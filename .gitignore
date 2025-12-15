@@ -1,28 +1,41 @@
-# OS
-.DS_Store
-Thumbs.db
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
 
-# Environment
-.env*
-*.local
+# dependencies
+node_modules/
 
 # Expo
 .expo/
-.expo-shared/
+dist/
 web-build/
+expo-env.d.ts
 
-# Node
-node_modules/
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
 
-# IDE
-.vscode/
-.idea/
+# Metro
+.metro-health-check*
 
-# Logs
-*.log
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
 
-# Supabase
-.supabase/
+# macOS
+.DS_Store
+*.pem
 
-# Misc
-*.swp
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+/ios
+/android
