@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env*
+*.local
+
+# Expo
+.expo/
+.expo-shared/
+web-build/
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Supabase
+.supabase/
+
+# Misc
+*.swp
