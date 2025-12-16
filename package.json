@@ -12,15 +12,20 @@
     "start:prod": "cross-env EXPO_PUBLIC_ENV=prod expo start"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.87.3",
     "expo": "~54.0.29",
     "expo-constants": "~18.0.12",
+    "expo-sqlite": "~16.0.10",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
-    "react-native": "0.81.5"
+    "react-native": "0.81.5",
+    "react-native-url-polyfill": "^3.0.0",
+    "@expo/vector-icons": "^15.0.3"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
     "cross-env": "^10.1.0",
+    "dotenv": "^17.2.3",
     "typescript": "~5.9.2"
   },
   "private": true
