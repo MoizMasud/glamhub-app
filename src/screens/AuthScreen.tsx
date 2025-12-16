@@ -1,5 +1,5 @@
 // src/screens/AuthScreen.tsx
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -11,35 +11,74 @@ import {
   StatusBar,
   ActivityIndicator,
   Alert,
-  Image,
-  KeyboardAvoidingView,
+  Keyboard,
+  TouchableWithoutFeedback,
+  useWindowDimensions,
+  Animated,
+  Easing,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import { signIn, signUp, UserRole } from "../lib/auth";
 
 const PINK = "#f9dfdd";
 const BLACK = "#000000";
 const OFF_WHITE = "#FFFFEF";
+
 type ThemeMode = "light" | "dark";
 const theme: ThemeMode = "light";
 type Mode = "signin" | "signup";
 
-export default function AuthScreen({ onBack }: { onBack: () => void }) {
+const AnimatedImage = Animated.createAnimatedComponent(
+  // @ts-ignore RN types are fine at runtime
+  require("react-native").Image
+);
 
+export default function AuthScreen({ onBack }: { onBack: () => void }) {
   const BG = theme === "dark" ? BLACK : PINK;
 
-  const logoSource =
-    theme === "dark"
-      ? require("../../assets/gh-dark.png")
-      : require("../../assets/gh-light.png");
+  const logoSource = useMemo(
+    () =>
+      theme === "dark"
+        ? require("../../assets/gh-dark.png")
+        : require("../../assets/gh-light.png"),
+    []
+  );
 
-
+  const { height: screenH } = useWindowDimensions();
 
   const [mode, setMode] = useState<Mode>("signin");
   const [role, setRole] = useState<UserRole>("client");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const scrollRef = useRef<KeyboardAwareScrollView>(null);
+
+  // ✅ compute target logo size (same logic as before)
+  const targetLogoSize = useMemo(() => {
+    const base = Math.min(400, Math.max(260, Math.floor(screenH * 0.42)));
+    return mode === "signup" ? Math.floor(base * 0.82) : base;
+  }, [screenH, mode]);
+
+  // ✅ animated logo size (smooth, not glitchy)
+  const logoSizeAnim = useRef(new Animated.Value(targetLogoSize)).current;
+
+  useEffect(() => {
+    Animated.timing(logoSizeAnim, {
+      toValue: targetLogoSize,
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false, // width/height can't use native driver
+    }).start();
+  }, [targetLogoSize, logoSizeAnim]);
+
+  // ✅ reset scroll position on mode change so top/back never appears “cut off”
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollToPosition(0, 0, false);
+    });
+  }, [mode]);
 
   const submit = async () => {
     try {
@@ -66,122 +105,145 @@ export default function AuthScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const goAlt = () => setMode(mode === "signin" ? "signup" : "signin");
+  const goAlt = () => {
+    Keyboard.dismiss();
+    setMode((m) => (m === "signin" ? "signup" : "signin"));
+  };
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: BG }]}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
-        <View style={[styles.screen, { backgroundColor: BG }]}>
-          {/* back */}
-          <View style={styles.topRow}>
-            <Pressable onPress={onBack} style={styles.backIconBtn} hitSlop={10}>
-              <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
-            </Pressable>
-          </View>
-
-          <View style={styles.main}>
-            {/* logo */}
-            <View style={styles.logoArea}>
-              <Image source={logoSource} style={styles.logo} resizeMode="contain" />
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <KeyboardAwareScrollView
+          ref={scrollRef}
+          style={{ flex: 1, backgroundColor: BG }}
+          contentContainerStyle={{ flexGrow: 1 }}
+          enableOnAndroid
+          enableAutomaticScroll
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          extraScrollHeight={Platform.OS === "ios" ? 18 : 24}
+          extraHeight={Platform.OS === "ios" ? 8 : 0}
+        >
+          <View style={[styles.screen, { backgroundColor: BG }]}>
+            {/* back */}
+            <View style={styles.topRow}>
+              <Pressable onPress={onBack} style={styles.backIconBtn} hitSlop={10}>
+                <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
+              </Pressable>
             </View>
 
-            {/* more space between logo and inputs */}
-            <View style={styles.formArea}>
-              {mode === "signup" && (
-                <View style={styles.roleRow}>
-                  <Pressable
-                    onPress={() => setRole("client")}
-                    style={[
-                      styles.rolePill,
-                      role === "client" ? styles.roleActive : styles.roleIdle,
-                    ]}
-                  >
-                    <Text
+            <View style={styles.main}>
+              {/* logo (animated resize) */}
+              <View style={styles.logoArea}>
+                <AnimatedImage
+                  source={logoSource}
+                  resizeMode="contain"
+                  style={{
+                    width: logoSizeAnim,
+                    height: logoSizeAnim,
+                  }}
+                />
+              </View>
+
+              {/* form */}
+              <View style={styles.formArea}>
+                {mode === "signup" && (
+                  <View style={styles.roleRow}>
+                    <Pressable
+                      onPress={() => setRole("client")}
                       style={[
-                        styles.roleText,
-                        { color: role === "client" ? OFF_WHITE : "rgba(0,0,0,0.55)" },
+                        styles.rolePill,
+                        role === "client" ? styles.roleActive : styles.roleIdle,
                       ]}
                     >
-                      Client
-                    </Text>
-                  </Pressable>
+                      <Text
+                        style={[
+                          styles.roleText,
+                          { color: role === "client" ? OFF_WHITE : "rgba(0,0,0,0.55)" },
+                        ]}
+                      >
+                        Client
+                      </Text>
+                    </Pressable>
 
-                  <Pressable
-                    onPress={() => setRole("artist")}
-                    style={[
-                      styles.rolePill,
-                      role === "artist" ? styles.roleActive : styles.roleIdle,
-                    ]}
-                  >
-                    <Text
+                    <Pressable
+                      onPress={() => setRole("artist")}
                       style={[
-                        styles.roleText,
-                        { color: role === "artist" ? OFF_WHITE : "rgba(0,0,0,0.55)" },
+                        styles.rolePill,
+                        role === "artist" ? styles.roleActive : styles.roleIdle,
                       ]}
                     >
-                      Artist
-                    </Text>
-                  </Pressable>
-                </View>
-              )}
-
-              <TextInput
-                value={email}
-                onChangeText={setEmail}
-                autoCapitalize="none"
-                keyboardType="email-address"
-                placeholder="Username"
-                placeholderTextColor="rgba(0,0,0,0.42)"
-                style={styles.input}
-              />
-
-              <TextInput
-                value={password}
-                onChangeText={setPassword}
-                secureTextEntry
-                placeholder="Password"
-                placeholderTextColor="rgba(0,0,0,0.42)"
-                style={styles.input}
-              />
-
-              <Pressable
-                onPress={submit}
-                disabled={loading}
-                style={[styles.loginBtn, loading && { opacity: 0.7 }]}
-              >
-                {loading ? (
-                  <ActivityIndicator color={OFF_WHITE} />
-                ) : (
-                  <Text style={styles.loginText}>
-                    {mode === "signin" ? "LOGIN" : "SIGN UP"}
-                  </Text>
+                      <Text
+                        style={[
+                          styles.roleText,
+                          { color: role === "artist" ? OFF_WHITE : "rgba(0,0,0,0.55)" },
+                        ]}
+                      >
+                        Artist
+                      </Text>
+                    </Pressable>
+                  </View>
                 )}
-              </Pressable>
 
-              {/* ✅ bring “Don’t have an account?” closer to login button */}
-              <View style={{ height: 10 }} />
-            </View>
+                <TextInput
+                  value={email}
+                  onChangeText={setEmail}
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                  placeholder="Username"
+                  placeholderTextColor="rgba(0,0,0,0.42)"
+                  style={styles.input}
+                  returnKeyType="next"
+                  autoCorrect={false}
+                />
 
-            {/* bottom pinned */}
-            <View style={styles.bottomArea}>
-              <Text style={styles.helper}>
-                {mode === "signin" ? "Don’t have an account?" : "Already have an account?"}
-              </Text>
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry
+                  placeholder="Password"
+                  placeholderTextColor="rgba(0,0,0,0.42)"
+                  style={styles.input}
+                  returnKeyType="done"
+                  autoCorrect={false}
+                  onSubmitEditing={submit}
+                />
 
-              <Pressable onPress={goAlt} style={styles.signupBtn}>
-                <Text style={styles.signupText}>
-                  {mode === "signin" ? "SIGN UP" : "SIGN IN"}
+                <Pressable
+                  onPress={submit}
+                  disabled={loading}
+                  style={[styles.loginBtn, loading && { opacity: 0.7 }]}
+                >
+                  {loading ? (
+                    <ActivityIndicator color={OFF_WHITE} />
+                  ) : (
+                    <Text style={styles.loginText}>
+                      {mode === "signin" ? "LOGIN" : "SIGN UP"}
+                    </Text>
+                  )}
+                </Pressable>
+
+                <View style={{ height: 10 }} />
+              </View>
+
+              {/* bottom pinned */}
+              <View style={styles.bottomArea}>
+                <Text style={styles.helper}>
+                  {mode === "signin" ? "Don’t have an account?" : "Already have an account?"}
                 </Text>
-              </Pressable>
-            </View>
-          </View>
 
-          <View style={{ height: 12 }} />
-        </View>
-      </KeyboardAvoidingView>
+                <Pressable onPress={goAlt} style={styles.signupBtn}>
+                  <Text style={styles.signupText}>
+                    {mode === "signin" ? "SIGN UP" : "SIGN IN"}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+
+            <View style={{ height: 12 }} />
+          </View>
+        </KeyboardAwareScrollView>
+      </TouchableWithoutFeedback>
     </SafeAreaView>
   );
 }
@@ -213,23 +275,17 @@ const styles = StyleSheet.create({
 
   main: { flex: 1 },
 
-  // ✅ larger logo
   logoArea: {
     alignItems: "center",
     justifyContent: "center",
     paddingTop: 6,
   },
-  logo: {
-    width: 400,
-    height: 400,
-  },
 
-  // ✅ more space between logo and inputs
   formArea: {
     width: "100%",
     alignSelf: "center",
     justifyContent: "flex-start",
-    marginTop: 22, // more space after logo
+    marginTop: 22,
   },
 
   roleRow: {
@@ -253,19 +309,18 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
   },
 
-  // ✅ slimmer “Apple feel”
   input: {
     width: "86%",
     alignSelf: "center",
     backgroundColor: OFF_WHITE,
     borderRadius: 999,
     paddingHorizontal: 18,
-    paddingVertical: 13, // slimmer
+    paddingVertical: 13,
     fontFamily: "Inter",
     fontWeight: "700",
     fontSize: 15,
     color: BLACK,
-    marginBottom: 8, // ✅ as requested
+    marginBottom: 8,
   },
 
   loginBtn: {
@@ -294,7 +349,7 @@ const styles = StyleSheet.create({
     fontFamily: "Inter",
     fontWeight: "700",
     color: "rgba(0,0,0,0.45)",
-    marginBottom: 8, // slightly tighter
+    marginBottom: 8,
   },
 
   signupBtn: {

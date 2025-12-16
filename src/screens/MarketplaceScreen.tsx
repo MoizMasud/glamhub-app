@@ -12,6 +12,7 @@ import {
   Platform,
   StatusBar,
   Image,
+  Dimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
@@ -22,8 +23,12 @@ const BLACK = "#000000";
 const OFF_WHITE = "#FFFFEF";
 const MUTED = "rgba(0,0,0,0.55)";
 const BORDER = "rgba(0,0,0,0.10)";
+const AVATAR_BG = "rgba(0,0,0,0.06)";
 
 const GH_WHITE = require("../../assets/gh-white.png");
+
+const { width: SCREEN_W } = Dimensions.get("window");
+const CHIP_MAX_W = Math.min(240, Math.floor(SCREEN_W * 0.62)); // keeps pills from overflowing
 
 function formatPrice(cents: number) {
   return `$${(cents / 100).toFixed(0)} CAD`;
@@ -37,10 +42,6 @@ function hash(str: string) {
 }
 function fakeRating(id: string) {
   return 3.5 + (hash(id) % 4) * 0.5; // 3.5–5.0
-}
-// stable random image per service
-function unsplashImage(id: string) {
-  return `https://source.unsplash.com/300x300/?portrait,beauty&sig=${hash(id) % 1000}`;
 }
 
 function titleFromFilters(filters?: MarketplaceFilters | null) {
@@ -62,6 +63,16 @@ function compactMeta(s: MarketplaceService) {
     .slice(0, 4);
 
   return [...base, ...tokens].join(" • ");
+}
+
+function getInitials(name?: string | null) {
+  const n = (name ?? "").trim();
+  if (!n) return "GH";
+  const parts = n.split(/\s+/).filter(Boolean);
+  const first = parts[0]?.[0] ?? "";
+  const second = (parts.length > 1 ? parts[1]?.[0] : parts[0]?.[1]) ?? "";
+  const out = `${first}${second}`.toUpperCase();
+  return out || "GH";
 }
 
 type ClearFlags = {
@@ -91,6 +102,25 @@ export default function MarketplaceScreen({
   const [loading, setLoading] = useState(true);
   const [services, setServices] = useState<MarketplaceService[]>([]);
   const [clears, setClears] = useState<ClearFlags>({});
+
+  // ✅ auth-aware header icon (login icon when logged out, burger when logged in)
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+
+  useEffect(() => {
+    // initial check
+    supabase.auth.getUser().then(({ data }) => {
+      setIsLoggedIn(!!data.user);
+    });
+
+    // keep in sync on login/logout
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsLoggedIn(!!session?.user);
+    });
+
+    return () => {
+      sub.subscription.unsubscribe();
+    };
+  }, []);
 
   // if parent filters change, reset local “closed chips”
   useEffect(() => {
@@ -210,7 +240,7 @@ export default function MarketplaceScreen({
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.screen}>
-        {/* Header: back — logo — menu */}
+        {/* Header: back — logo — (login icon OR burger menu) */}
         <View style={styles.header}>
           <Pressable onPress={onEditFilters} style={styles.headerBtn} hitSlop={10}>
             <Ionicons name="chevron-back" size={22} color={BLACK} />
@@ -221,27 +251,26 @@ export default function MarketplaceScreen({
           </View>
 
           <Pressable
-            onPress={async () => {
-              const { data } = await supabase.auth.getUser();
-              if (!data.user) onRequestSignIn?.();
+            onPress={() => {
+              if (!isLoggedIn) onRequestSignIn?.();
               else onOpenAccount();
             }}
             style={styles.headerBtn}
             hitSlop={10}
           >
-            <Ionicons name="menu" size={22} color={BLACK} />
+            <Ionicons
+              name={isLoggedIn ? "menu" : "person-circle-outline"}
+              size={24}
+              color={BLACK}
+            />
           </Pressable>
         </View>
 
         <Text style={styles.title}>{titleFromFilters(effectiveFilters)}</Text>
 
+        {/* ✅ Chips that WRAP (no overflow) */}
         {!!chips.length && (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.chipsScroll}
-            contentContainerStyle={styles.chipsRow}
-          >
+          <View style={styles.chipsWrap}>
             {chips.map((c) => {
               const isPrimary = c.kind === "primary";
 
@@ -249,9 +278,17 @@ export default function MarketplaceScreen({
                 <Pressable
                   key={c.key}
                   onPress={onEditFilters}
-                  style={[styles.chip, isPrimary ? styles.chipPrimary : styles.chipOutline]}
+                  style={[
+                    styles.chip,
+                    isPrimary ? styles.chipPrimary : styles.chipOutline,
+                    { maxWidth: CHIP_MAX_W },
+                  ]}
                 >
-                  <Text style={[styles.chipText, isPrimary && styles.chipTextPrimary]} numberOfLines={1}>
+                  <Text
+                    style={[styles.chipText, isPrimary && styles.chipTextPrimary]}
+                    numberOfLines={1}
+                    ellipsizeMode="tail"
+                  >
                     {c.label}
                   </Text>
 
@@ -263,16 +300,12 @@ export default function MarketplaceScreen({
                     hitSlop={10}
                     style={styles.chipCloseBtn}
                   >
-                    <Ionicons
-                      name="close"
-                      size={16}
-                      color={isPrimary ? OFF_WHITE : BLACK}
-                    />
+                    <Ionicons name="close" size={16} color={isPrimary ? OFF_WHITE : BLACK} />
                   </Pressable>
                 </Pressable>
               );
             })}
-          </ScrollView>
+          </View>
         )}
 
         {loading ? (
@@ -280,22 +313,23 @@ export default function MarketplaceScreen({
             <ActivityIndicator />
           </View>
         ) : (
-          <ScrollView contentContainerStyle={styles.list}>
+          <ScrollView contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
             {filtered.map((s) => {
               const rating = fakeRating(s.id);
+              const displayName = s.artist?.username ?? "Artist";
+              const initials = getInitials(displayName);
 
               return (
-                <Pressable
-                  key={s.id}
-                  style={styles.card}
-                  onPress={() => onOpenService(s.id)}
-                >
-                  <Image source={{ uri: unsplashImage(s.id) }} style={styles.avatar} />
+                <Pressable key={s.id} style={styles.card} onPress={() => onOpenService(s.id)}>
+                  {/* ✅ No Unsplash — clean initials avatar */}
+                  <View style={styles.avatar}>
+                    <Text style={styles.avatarText}>{initials}</Text>
+                  </View>
 
                   <View style={styles.cardBody}>
                     <Pressable onPress={() => onOpenArtist(s.artist_id)}>
                       <Text style={styles.name} numberOfLines={1}>
-                        {s.artist?.username ?? "Artist"}
+                        {displayName}
                       </Text>
                     </Pressable>
 
@@ -315,9 +349,7 @@ export default function MarketplaceScreen({
               );
             })}
 
-            {!filtered.length && (
-              <Text style={styles.empty}>No results match your filters.</Text>
-            )}
+            {!filtered.length && <Text style={styles.empty}>No results match your filters.</Text>}
 
             {/* prevents TabBar overlap */}
             <View style={{ height: 110 }} />
@@ -350,16 +382,16 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
 
-  // ✅ bigger logo like the screenshot
+  // ✅ bigger logo like the screenshot (more prominent)
   logoWrap: {
-    height: 44,
-    width: 160,
+    height: 56,
+    width: 210,
     alignItems: "center",
     justifyContent: "center",
   },
   logo: {
-    height: 34,
-    width: 160,
+    height: 44,
+    width: 210,
   },
 
   title: {
@@ -367,15 +399,15 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     color: BLACK,
     marginTop: 6,
-    marginBottom: 12,
+    marginBottom: 10,
   },
 
-  chipsScroll: {
-    maxHeight: 54, // ✅ prevent tall stretch
-  },
-  chipsRow: {
-    gap: 12,
-    paddingBottom: 10,
+  // ✅ WRAPPING chips container (no horizontal overflow)
+  chipsWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    paddingBottom: 12,
     alignItems: "center",
   },
 
@@ -404,7 +436,7 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     fontSize: 14,
     color: BLACK,
-    maxWidth: 260,
+    flexShrink: 1,
   },
   chipTextPrimary: {
     color: OFF_WHITE,
@@ -417,7 +449,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
-  list: { gap: 10 },
+  list: { gap: 10, paddingTop: 2 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
 
   card: {
@@ -431,11 +463,20 @@ const styles = StyleSheet.create({
     borderColor: BORDER,
   },
 
+  // ✅ initials avatar
   avatar: {
     width: 62,
     height: 62,
     borderRadius: 16,
-    backgroundColor: "rgba(0,0,0,0.05)",
+    backgroundColor: AVATAR_BG,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarText: {
+    fontSize: 16,
+    fontWeight: "900",
+    color: "rgba(0,0,0,0.75)",
+    letterSpacing: 0.5,
   },
 
   cardBody: { flex: 1 },
@@ -463,10 +504,10 @@ const styles = StyleSheet.create({
   ratingText: { fontWeight: "900", fontSize: 11, color: BLACK },
 
   empty: {
-    marginTop: 20,
+    marginTop: 18,
     fontWeight: "800",
     color: "rgba(0,0,0,0.35)",
     textAlign: "center",
-    fontSize: 20,
+    fontSize: 18,
   },
 });

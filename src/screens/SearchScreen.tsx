@@ -307,12 +307,6 @@ export default function SearchScreen({
             <Text style={styles.h1}>Search</Text>
             <Text style={styles.sub}>Find the right artist, fast.</Text>
           </View>
-
-          {!!onSkip && (
-            <Pressable onPress={onSkip} style={styles.pillBtn}>
-              <Text style={styles.pillText}>Skip</Text>
-            </Pressable>
-          )}
         </View>
 
         {/* Scrollable content (no outer Touchable wrapper -> scrolling feels effortless) */}
@@ -326,7 +320,7 @@ export default function SearchScreen({
           onScrollBeginDrag={() => Keyboard.dismiss()}
         >
           {/* Primary filters */}
-          <View style={styles.card}>
+          <View>
             <Text style={styles.label}>Service</Text>
             <Pressable
               onPress={() => {
@@ -419,14 +413,6 @@ export default function SearchScreen({
                 </View>
               )}
             </View>
-
-            <Text style={styles.hint}>
-              {ExpoLocation
-                ? locationCoords
-                  ? "Location locked (coords saved)."
-                  : "Type 3+ characters to see suggestions."
-                : "Install expo-location to use GPS (optional)."}
-            </Text>
           </View>
 
           {/* Advanced toggle */}

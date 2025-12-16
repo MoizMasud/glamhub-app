@@ -1,4 +1,3 @@
-// App.tsx
 import React from "react";
 import { View, StyleSheet, Text, Pressable } from "react-native";
 import Constants from "expo-constants";
@@ -6,6 +5,7 @@ import Constants from "expo-constants";
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 
 import AuthScreen from "./src/screens/AuthScreen";
+import SearchScreen, { MarketplaceFilters } from "./src/screens/SearchScreen";
 import MarketplaceScreen from "./src/screens/MarketplaceScreen";
 import AccountScreen from "./src/screens/AccountScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
@@ -18,7 +18,8 @@ const PINK = "#f9dfdd";
 const BLACK = "#000000";
 
 type Route =
-  | { name: "marketplace" }
+  | { name: "search" }
+  | { name: "marketplace"; filters?: MarketplaceFilters | null }
   | { name: "auth" }
   | { name: "account" }
   | { name: "settings" }
@@ -66,7 +67,9 @@ function TabBar({
 
 function Root() {
   const { loading, user } = useAuth();
-  const [route, setRoute] = React.useState<Route>({ name: "marketplace" });
+
+  // ✅ Search is the landing screen
+  const [route, setRoute] = React.useState<Route>({ name: "search" });
 
   const [postAuthRoute, setPostAuthRoute] = React.useState<Route | null>(null);
   const prevUserIdRef = React.useRef<string | null>(null);
@@ -91,7 +94,7 @@ function Root() {
   // Public browsing allowed logged out. Kick out of private tabs/screens.
   React.useEffect(() => {
     if (!user && (route.name === "account" || route.name === "onboarding" || route.name === "settings")) {
-      setRoute({ name: "marketplace" });
+      setRoute({ name: "marketplace", filters: null });
     }
   }, [user, route.name]);
 
@@ -105,7 +108,17 @@ function Root() {
 
   // Auth
   if (route.name === "auth") {
-    return <AuthScreen onBack={() => setRoute({ name: "marketplace" })} />;
+    return <AuthScreen onBack={() => setRoute({ name: "marketplace", filters: null })} />;
+  }
+
+  // Landing Search
+  if (route.name === "search") {
+    return (
+      <SearchScreen
+        onSearch={(filters) => setRoute({ name: "marketplace", filters })}
+        onSkip={() => setRoute({ name: "marketplace", filters: null })}
+      />
+    );
   }
 
   // Deep screens
@@ -117,7 +130,7 @@ function Root() {
     return (
       <ArtistProfileScreen
         artistId={route.artistId}
-        onBack={() => setRoute({ name: "marketplace" })}
+        onBack={() => setRoute({ name: "marketplace", filters: null })}
         onOpenService={(serviceId) => setRoute({ name: "service", serviceId })}
       />
     );
@@ -128,7 +141,7 @@ function Root() {
       <ServiceDetailsScreen
         serviceId={route.serviceId}
         autoBook={!!route.autoBook}
-        onBack={() => setRoute({ name: "marketplace" })}
+        onBack={() => setRoute({ name: "marketplace", filters: null })}
         onPressArtist={(artistId) => setRoute({ name: "artist", artistId })}
         onRequestSignInForBooking={(serviceId) => {
           setPostAuthRoute({ name: "service", serviceId, autoBook: true });
@@ -151,29 +164,29 @@ function Root() {
   return (
     <View style={{ flex: 1 }}>
       {route.name === "account" && (
-      <AccountScreen
-          onBack={() => setRoute({ name: "marketplace" })}
+        <AccountScreen
+          onBack={() => setRoute({ name: "marketplace", filters: null })}
           onOpenOnboarding={() => setRoute({ name: "onboarding" })}
           onOpenSettings={() => setRoute({ name: "settings" })}
-          onSignedOut={() => setRoute({ name: "marketplace" })}
+          onSignedOut={() => setRoute({ name: "marketplace", filters: null })}
         />
       )}
 
       {route.name === "settings" && (
-        <SettingsScreen onBack={() => setRoute({ name: "marketplace" })} />
+        <SettingsScreen onBack={() => setRoute({ name: "marketplace", filters: null })} />
       )}
 
-      {route.name === "marketplace" && (
-        <MarketplaceScreen
-          onRequestSignIn={() => setRoute({ name: "auth" })}
-          onOpenAccount={() => {
-            if (!user) setRoute({ name: "auth" });
-            else setRoute({ name: "account" });
-          }}
-          onOpenArtist={(artistId) => setRoute({ name: "artist", artistId })}
-          onOpenService={(serviceId) => setRoute({ name: "service", serviceId })}
-        />
-      )}
+    {route.name === "marketplace" && (
+      <MarketplaceScreen
+        filters={route.filters ?? null}
+        onEditFilters={() => setRoute({ name: "search" })}
+        onRequestSignIn={() => setRoute({ name: "auth" })}
+        onOpenAccount={() => (user ? setRoute({ name: "account" }) : setRoute({ name: "auth" }))}
+        onOpenArtist={(artistId) => setRoute({ name: "artist", artistId })}
+        onOpenService={(serviceId) => setRoute({ name: "service", serviceId })}
+      />
+    )}
+
 
       {!!user && (
         <TabBar
@@ -181,6 +194,12 @@ function Root() {
           onGo={(r) => {
             if (!user && (r.name === "account" || r.name === "settings")) {
               setRoute({ name: "auth" });
+              return;
+            }
+            // Marketplace tab keeps current filters if you're already on marketplace
+            if (r.name === "marketplace") {
+              const currentFilters = route.name === "marketplace" ? route.filters ?? null : null;
+              setRoute({ name: "marketplace", filters: currentFilters });
               return;
             }
             setRoute(r);
