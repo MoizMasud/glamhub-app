@@ -11,15 +11,19 @@ import SearchScreen, { MarketplaceFilters } from "./src/screens/SearchScreen";
 import MarketplaceScreen from "./src/screens/MarketplaceScreen";
 import AccountScreen from "./src/screens/AccountScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
-import ArtistOnboardingScreen from "./src/screens/ArtistOnboardingScreen";
+import ArtistOnboardingScreen from "./src/screens/EditProfileScreen";
 import ArtistProfileScreen from "./src/screens/ArtistProfileScreen";
 import ServiceDetailsScreen from "./src/screens/ServiceDetailsScreen";
-import BookingsScreen from "./src/screens/BookingsScreen";
+import BookingsScreen from "./src/screens/BookingsScreen"; // list of bookings
+import BookingScreen from "./src/screens/BookingScreen";   // booking flow
 
-const OFF_WHITE = "#FFFFEF";
+// ✅ NEW booking screens you just added
+import BookingSelectedScreen from "./src/screens/BookingSelectedScreen";
+
+const OFF_WHITE = "#FFFFFF";
 const BLACK = "#000000";
 const GREY = "rgba(0,0,0,0.38)";
-const BORDER = "rgba(0,0,0,0.10)";
+const BORDER = "rgba(0,0,0,0.08)";
 
 // ✅ transparent logo with black text (no circle/background)
 const GH_LOGO = require("./assets/gh-white.png");
@@ -32,8 +36,10 @@ type Route =
   | { name: "account" }
   | { name: "settings" }
   | { name: "onboarding" }
-  | { name: "artist"; artistId: string }
-  | { name: "service"; serviceId: string; autoBook?: boolean };
+  | { name: "artist"; artistId: string; selectedServiceId?: string | null }
+  | { name: "service"; serviceId: string; autoBook?: boolean }
+  | { name: "booking"; artistId: string; initialServiceIds?: string[] }
+  | { name: "bookingSelected"; artistId: string; serviceIds: string[] };
 
 type TabName = "search" | "marketplace" | "bookings" | "account";
 
@@ -120,6 +126,7 @@ function Root() {
     const prev = prevUserIdRef.current;
     const next = user?.id ?? null;
 
+    // When user logs in on Auth screen → go back where we wanted
     if (route.name === "auth" && !prev && next) {
       if (postAuthRoute) {
         setRoute(postAuthRoute);
@@ -176,16 +183,70 @@ function Root() {
     return <ArtistOnboardingScreen onBack={() => setRoute({ name: "account" })} />;
   }
 
+  // ✅ Artist Profile (now uses popup + select + book)
   if (route.name === "artist") {
     return (
       <ArtistProfileScreen
         artistId={route.artistId}
         onBack={() => setRoute({ name: "marketplace", filters: lastFiltersRef.current })}
-        onOpenService={(serviceId) => setRoute({ name: "service", serviceId })}
+        onOpenBooking={({ artistId, serviceIds }) => {
+          // if not logged in, go auth then return here
+          if (!user) {
+            setPostAuthRoute({ name: "bookingSelected", artistId, serviceIds });
+            setRoute({ name: "auth" });
+            return;
+          }
+          setRoute({ name: "bookingSelected", artistId, serviceIds });
+        }}
+        onRequestSignIn={() => {
+          setPostAuthRoute({ name: "artist", artistId: route.artistId });
+          setRoute({ name: "auth" });
+        }}
       />
     );
   }
 
+  // ✅ Booking (full flow: choose services + date + time)
+  if (route.name === "booking") {
+    return (
+      <BookingScreen
+        artistId={route.artistId}
+        initialServiceIds={route.initialServiceIds ?? []}
+        onBack={() => setRoute({ name: "artist", artistId: route.artistId })}
+        onRequestSignIn={() => {
+          setPostAuthRoute({
+            name: "booking",
+            artistId: route.artistId,
+            initialServiceIds: route.initialServiceIds ?? [],
+          });
+          setRoute({ name: "auth" });
+        }}
+        onBooked={() => setRoute({ name: "account" })}
+      />
+    );
+  }
+
+  // ✅ Booking Selected (services already chosen on profile)
+  if (route.name === "bookingSelected") {
+    return (
+      <BookingSelectedScreen
+        artistId={route.artistId}
+        serviceIds={route.serviceIds}
+        onBack={() => setRoute({ name: "artist", artistId: route.artistId })}
+        onRequestSignIn={() => {
+          setPostAuthRoute({
+            name: "bookingSelected",
+            artistId: route.artistId,
+            serviceIds: route.serviceIds,
+          });
+          setRoute({ name: "auth" });
+        }}
+        onBooked={() => setRoute({ name: "account" })}
+      />
+    );
+  }
+
+  // Service details still supported from marketplace
   if (route.name === "service") {
     return (
       <ServiceDetailsScreen
@@ -233,7 +294,9 @@ function Root() {
               setRoute({ name: "auth" });
             }
           }}
-          onOpenArtist={(artistId) => setRoute({ name: "artist", artistId })}
+          onOpenArtist={(artistId, selectedServiceId) =>
+            setRoute({ name: "artist", artistId, selectedServiceId: selectedServiceId ?? null })
+          }
           onOpenService={(serviceId) => setRoute({ name: "service", serviceId })}
         />
       )}
@@ -249,15 +312,11 @@ function Root() {
         />
       )}
 
-      {/* ✅ Bookings (now actually renders) */}
-      {route.name === "bookings" && (
-        <BookingsScreen onBack={() => setRoute({ name: "account" })} />
-      )}
+      {/* ✅ Bookings */}
+      {route.name === "bookings" && <BookingsScreen onBack={() => setRoute({ name: "account" })} />}
 
-      {/* ✅ Settings (now actually renders) */}
-      {route.name === "settings" && (
-        <SettingsScreen onBack={() => setRoute({ name: "account" })} />
-      )}
+      {/* ✅ Settings */}
+      {route.name === "settings" && <SettingsScreen onBack={() => setRoute({ name: "account" })} />}
 
       {showTabs && (
         <TabBar

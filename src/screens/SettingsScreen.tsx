@@ -11,11 +11,15 @@ import {
   Alert,
   Switch,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 
 const PINK = "#f9dfdd";
 const BLACK = "#000000";
-const OFF_WHITE = "#FFFFEF";
+const OFF_WHITE = "#FFFFFF";
+
+const MUTED = "rgba(0,0,0,0.60)";
+const BORDER = "rgba(0,0,0,0.12)";
 
 export default function SettingsScreen({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
@@ -104,16 +108,23 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <View style={styles.screen}>
-        <View style={styles.header}>
-          <Pressable onPress={onBack} style={styles.pillBtn}>
-            <Text style={styles.pillText}>Back</Text>
+      <View style={styles.container}>
+        {/* Header (match other screens) */}
+        <View style={styles.topBar}>
+          <Pressable onPress={onBack} style={styles.iconBtn} accessibilityRole="button">
+            <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
           </Pressable>
 
           <Text style={styles.h1}>Settings</Text>
 
-          <Pressable onPress={load} style={styles.pillBtn}>
-            <Text style={styles.pillText}>Refresh</Text>
+          <Pressable
+            onPress={load}
+            style={[styles.iconBtn, (loading || saving) && { opacity: 0.6 }]}
+            disabled={loading || saving}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh settings"
+          >
+            <Ionicons name="refresh" size={20} color={"rgba(0,0,0,0.75)"} />
           </Pressable>
         </View>
 
@@ -123,31 +134,21 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
           </View>
         ) : (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Booking history</Text>
-            <Text style={styles.cardSub}>
-              Choose whether cancelled/completed bookings should be removed from your
-              view automatically.
+            <Text style={styles.sectionTitle}>Booking history</Text>
+            <Text style={styles.help}>
+              Choose whether cancelled/completed bookings should be removed from your view automatically.
             </Text>
 
-            <View style={styles.row}>
-              <View style={{ flex: 1, paddingRight: 10 }}>
-                <Text style={styles.rowLabel}>Auto-remove after 24 hours</Text>
-                <Text style={styles.rowHint}>
-                  Applies only to your view (the other person may still see it).
-                </Text>
+            <View style={styles.settingRow}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={styles.rowTitle}>Auto-remove after 24 hours</Text>
+                <Text style={styles.rowSub}>Applies only to your view (the other person may still see it).</Text>
               </View>
 
               <Switch value={autoCleanup} onValueChange={onToggle} disabled={saving} />
             </View>
 
             {saving && <Text style={styles.savingText}>Saving…</Text>}
-
-            <View style={styles.tip}>
-              <Text style={styles.tipText}>
-                Tip: In Account, you can manually “Remove” cancelled/completed bookings
-                anytime.
-              </Text>
-            </View>
           </View>
         )}
       </View>
@@ -161,63 +162,62 @@ const styles = StyleSheet.create({
     backgroundColor: OFF_WHITE,
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
   },
-  screen: {
-    flex: 1,
-    backgroundColor: OFF_WHITE,
+  container: { flex: 1, backgroundColor: OFF_WHITE },
+
+  topBar: {
     paddingHorizontal: 16,
     paddingTop: 12,
-    gap: 12,
-  },
-  header: {
+    paddingBottom: 8,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingBottom: 10,
   },
   h1: { fontSize: 20, fontWeight: "900", color: BLACK },
 
-  pillBtn: {
-    backgroundColor: OFF_WHITE,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+  iconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.05)",
     borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.14)",
+    borderColor: "rgba(0,0,0,0.06)",
   },
-  pillText: { color: BLACK, fontWeight: "900" },
 
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
 
   card: {
-    borderRadius: 20,
-    backgroundColor: OFF_WHITE,
-    padding: 16,
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 10 },
-    elevation: 2,
+    marginHorizontal: 16,
+    marginTop: 8,
+    borderRadius: 18,
+    padding: 14,
+    backgroundColor: PINK,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.10)",
     gap: 10,
   },
-  cardTitle: { fontSize: 16, fontWeight: "900", color: BLACK },
-  cardSub: { color: BLACK, opacity: 0.75, fontWeight: "700", lineHeight: 18 },
 
-  row: {
+  sectionTitle: { fontSize: 16, fontWeight: "900", color: BLACK },
+  help: { color: MUTED, fontWeight: "700", fontSize: 12, lineHeight: 16 },
+
+  settingRow: {
     marginTop: 6,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: PINK,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    backgroundColor: OFF_WHITE,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.10)",
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
-  rowLabel: { color: BLACK, fontWeight: "900" },
-  rowHint: { marginTop: 4, color: BLACK, opacity: 0.75, fontWeight: "700", lineHeight: 18 },
 
-  savingText: { color: BLACK, opacity: 0.7, fontWeight: "800" },
+  rowTitle: { fontWeight: "900", color: BLACK, fontSize: 14 },
+  rowSub: { marginTop: 4, fontWeight: "800", color: MUTED, fontSize: 12, lineHeight: 16 },
+
+  savingText: { color: MUTED, fontWeight: "800", marginTop: 2 },
 
   tip: {
     marginTop: 6,
@@ -225,7 +225,10 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 12,
     borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.10)",
+    borderColor: BORDER,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
   },
-  tipText: { color: BLACK, fontWeight: "800", opacity: 0.85, lineHeight: 18 },
+  tipText: { flex: 1, color: "rgba(0,0,0,0.75)", fontWeight: "800", lineHeight: 18 },
 });

@@ -17,13 +17,17 @@ export async function setMyRole(role: "client" | "artist") {
   if (error) throw error;
 }
 
-export async function updateMyProfile(input: {
+export type UpdateMyProfileInput = {
   username?: string | null;
   city?: string | null;
   bio?: string | null;
-}) {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error("No user session");
+  avatar_url?: string | null; // ✅ add this
+};
+
+export async function updateMyProfile(input: UpdateMyProfileInput) {
+  const { data: auth } = await supabase.auth.getUser();
+  const user = auth.user;
+  if (!user) throw new Error("Not signed in");
 
   const { error } = await supabase
     .from("profiles")
@@ -31,11 +35,13 @@ export async function updateMyProfile(input: {
       username: input.username ?? null,
       city: input.city ?? null,
       bio: input.bio ?? null,
+      avatar_url: input.avatar_url ?? null, // ✅ add this
     })
     .eq("id", user.id);
 
   if (error) throw error;
 }
+
 
 export async function getMyProfile() {
   const { data: { user } } = await supabase.auth.getUser();

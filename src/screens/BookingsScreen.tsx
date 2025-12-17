@@ -25,9 +25,9 @@ import { Ionicons } from "@expo/vector-icons";
 
 const PINK = "#f6d6d6";
 const BLACK = "#000000";
-const OFF_WHITE = "#FFFFEF";
+const OFF_WHITE = "#FFFFfF";
 const MUTED = "rgba(0,0,0,0.6)";
-const BORDER = "rgba(0,0,0,0.10)";
+const BORDER = "rgba(0,0,0,0.08)";
 const CARD_BG = "rgba(0,0,0,0.03)";
 
 function isExpectedNoSessionError(e: any) {

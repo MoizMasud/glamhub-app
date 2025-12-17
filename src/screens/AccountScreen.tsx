@@ -16,9 +16,9 @@ import { getMyProfile, MyProfile } from "../lib/profile";
 
 const PINK = "#f6d6d6";
 const BLACK = "#000000";
-const OFF_WHITE = "#FFFFEF";
+const OFF_WHITE = "#FFFFfF";
 const MUTED = "rgba(0,0,0,0.6)";
-const BORDER = "rgba(0,0,0,0.10)";
+const BORDER = "rgba(0,0,0,0.08)";
 
 function isExpectedNoSessionError(e: any) {
   const msg = String(e?.message ?? "").toLowerCase();
@@ -125,8 +125,7 @@ export default function AccountScreen({
               </View>
 
               <View style={{ flex: 1 }}>
-                <Text style={styles.headerTitle}>Account</Text>
-                <Text style={styles.headerName}>{username}</Text>
+                <Text style={styles.headerTitle}>{username}</Text>
                 <Text style={styles.headerSub}>
                   {email} • {isArtist ? "Artist" : "Client"}
                 </Text>
@@ -136,10 +135,8 @@ export default function AccountScreen({
             {/* Menu */}
             <View style={styles.menuCard}>
               <MenuItem icon="calendar-outline" label="Manage Bookings" onPress={onOpenBookings} />
-
-              {!isArtist && (
-                <MenuItem icon="sparkles-outline" label="Become an Artist" onPress={onOpenOnboarding} />
-              )}
+              
+              <MenuItem icon="create-outline" label="Edit Profile" onPress={onOpenOnboarding} />
 
               <MenuItem icon="settings-outline" label="Settings" onPress={onOpenSettings} />
 

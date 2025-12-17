@@ -21,20 +21,18 @@ import type { MarketplaceFilters } from "./SearchScreen";
 
 const BLACK = "#000000";
 const WHITE = "#FFFFFF";
-const OFF_WHITE = "#FFFFEF";
+const OFF_WHITE = "#FFFFFF";
 
-const PINK_CARD = "#F6D6D6"; // main pink card
-const PINK_CARD_SOFT = "#F9DFDD"; // slightly softer for inner balance
-const MUTED = "rgba(0,0,0,0.55)";
-const MUTED_2 = "rgba(0,0,0,0.40)";
+const PINK_CARD = "#F6D6D6";
+const MUTED = "rgba(0,0,0,0.60)";
+const MUTED_2 = "rgba(0,0,0,0.45)";
 const CHIP_BORDER = "rgba(0,0,0,0.14)";
-const SHADOW = "rgba(0,0,0,0.10)";
-const AVATAR_FALLBACK = "rgba(255,255,255,0.65)";
+const BORDER = "rgba(0,0,0,0.08)";
 
 const { width: SCREEN_W } = Dimensions.get("window");
-const CHIP_MAX_W = Math.min(240, Math.floor(SCREEN_W * 0.62)); // keeps pills from overflowing
+const CHIP_MAX_W = Math.min(240, Math.floor(SCREEN_W * 0.62));
 
-function formatPrice(cents: number) {
+function formatPriceCAD(cents: number) {
   return `$${(cents / 100).toFixed(0)} CAD`;
 }
 
@@ -54,38 +52,30 @@ function titleFromFilters(filters?: MarketplaceFilters | null) {
   return "Filter Services";
 }
 
-function compactMeta(s: MarketplaceService) {
-  const base = s.title?.trim() ? [s.title.trim()] : [];
-  const desc = (s.description ?? "").trim();
-  if (!desc) return base.join(" • ");
-
+// Build the service “tags” line like: "Gel X • Manicure & Pedicure • Lashes • Waxing"
+function bulletMetaFromService(s: MarketplaceService) {
+  const desc = (s.description ?? "").replace(/\n/g, " ").trim();
   const tokens = desc
-    .replace(/\n/g, " ")
     .split(/[,•|/]+/)
     .map((t) => t.trim())
     .filter(Boolean)
     .slice(0, 4);
 
-  return [...base, ...tokens].join(" • ");
+  // If no description tokens, fall back to title
+  if (tokens.length === 0) {
+    const t = (s.title ?? "").trim();
+    return t ? t : "";
+  }
+
+  return tokens.join(" • ");
 }
 
-function getInitials(name?: string | null) {
-  const n = (name ?? "").trim();
-  if (!n) return "GH";
-  const parts = n.split(/\s+/).filter(Boolean);
-  const first = parts[0]?.[0] ?? "";
-  const second = (parts.length > 1 ? parts[1]?.[0] : parts[0]?.[1]) ?? "";
-  const out = `${first}${second}`.toUpperCase();
-  return out || "GH";
-}
-
-// make location pill show only "City" (not full address string)
 function compactCityLabel(raw?: string) {
   const s = String(raw ?? "").trim();
   if (!s) return "";
   const noNear = s.replace(/^near\s+/i, "").trim();
   const first = noNear.split(",")[0]?.trim() ?? "";
-  if (first.length <= 20) return first || noNear;
+  if (first.length <= 22) return first || noNear;
   const words = noNear.split(/\s+/).filter(Boolean);
   return words.slice(0, 2).join(" ");
 }
@@ -97,6 +87,11 @@ type ClearFlags = {
   rating?: boolean;
 };
 
+function getAvatarUrl(displayName: string) {
+  return ``;
+}
+
+
 export default function MarketplaceScreen({
   onRequestSignIn,
   onOpenAccount,
@@ -107,7 +102,10 @@ export default function MarketplaceScreen({
 }: {
   onRequestSignIn?: () => void;
   onOpenAccount: () => void;
-  onOpenArtist: (artistId: string) => void;
+
+  // card tap should open artist (and can pass selected service id)
+  onOpenArtist: (artistId: string, selectedServiceId?: string | null) => void;
+
   onOpenService: (serviceId: string) => void;
 
   filters?: MarketplaceFilters | null;
@@ -117,27 +115,20 @@ export default function MarketplaceScreen({
   const [services, setServices] = useState<MarketplaceService[]>([]);
   const [clears, setClears] = useState<ClearFlags>({});
 
-  // auth-aware header icon (not used in this screen yet, but keep state stable)
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-
-  // UI-only segmented toggle (no map logic added)
+  // UI-only segmented toggle (kept)
   const [viewMode, setViewMode] = useState<"list" | "map">("list");
 
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      setIsLoggedIn(!!data.user);
-    });
+  // auth aware (kept, even if not used here)
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
 
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setIsLoggedIn(!!data.user));
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       setIsLoggedIn(!!session?.user);
     });
-
-    return () => {
-      sub.subscription.unsubscribe();
-    };
+    return () => sub.subscription.unsubscribe();
   }, []);
 
-  // if parent filters change, reset local “closed chips”
   useEffect(() => {
     setClears({});
   }, [filters]);
@@ -241,9 +232,9 @@ export default function MarketplaceScreen({
     const hasKm = typeof f?.maxDistanceKm === "number";
 
     if (hasLoc || hasKm) {
-      const kmText = hasKm ? `${Math.round(Number(f.maxDistanceKm))} km` : "";
+      const kmText = hasKm ? `Distance <${Math.round(Number(f.maxDistanceKm))}km` : "";
       const cityText = hasLoc ? compactCityLabel(f.locationText) : "";
-      const label = [kmText, cityText].filter(Boolean).join(" • ");
+      const label = [kmText || "Distance", cityText].filter(Boolean).join(" ");
 
       out.push({
         key: "location",
@@ -256,7 +247,7 @@ export default function MarketplaceScreen({
     if (typeof f?.minRating === "number") {
       out.push({
         key: "rating",
-        label: `Rating ${Number(f.minRating).toFixed(1)}★`,
+        label: String(f.minRating) >= "4.5" ? "Rating 4.5+" : `Rating ${Number(f.minRating).toFixed(1)}★`,
         kind: "outline",
         onClose: () => setClears((p) => ({ ...p, rating: true })),
       });
@@ -274,7 +265,6 @@ export default function MarketplaceScreen({
           <View style={styles.chipsWrap}>
             {chips.map((c) => {
               const isPrimary = c.kind === "primary";
-
               return (
                 <Pressable
                   key={c.key}
@@ -309,59 +299,74 @@ export default function MarketplaceScreen({
           </View>
         )}
 
-        {loading ? (
+
+        {viewMode === "map" ? (
+          <View style={styles.mapPlaceholder}>
+            <Text style={styles.mapPlaceholderTitle}>Map View</Text>
+            <Text style={styles.mapPlaceholderText}>V2 soon to come</Text>
+          </View>
+        ) : loading ? (
           <View style={styles.center}>
             <ActivityIndicator />
           </View>
         ) : (
           <ScrollView contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
-            {filtered.map((s) => {
+            {filtered.map((s: any) => {
               const rating = fakeRating(s.id);
-              const displayName = s.artist?.username ?? "Artist";
-              const initials = getInitials(displayName);
+              const displayName = s.artist?.display_name || s.artist?.username || "Artist";
+              const pronouns = s.artist?.pronouns ? `(${s.artist.pronouns})` : "";
+              const metaLine = bulletMetaFromService(s);
 
-              // If you have an avatar field in your DB, this will use it.
-              // Otherwise it falls back to initials (same logic/behavior).
               const avatarUrl =
-                (s as any)?.artist?.avatar_url ||
-                (s as any)?.artist?.photo_url ||
-                (s as any)?.artist?.image_url ||
-                null;
+                s.artist?.avatar_url ||
+                getAvatarUrl(displayName);
+
+
+              // Price range (if you ever add ranges later, this will still render nicely)
+              const priceText = formatPriceCAD(s.price_cents);
 
               return (
-                <Pressable key={s.id} style={styles.card} onPress={() => onOpenService(s.id)}>
-                  {/* Left image block (spans card height like screenshot) */}
-                  <View style={styles.imageWrap}>
+                <Pressable
+                  key={s.id}
+                  style={styles.card}
+                  onPress={() => onOpenArtist(s.artist_id, s.id)}
+                >
+                  {/* LEFT IMAGE — full height */}
+                  <View style={styles.cardImageWrap}>
                     {avatarUrl ? (
-                      <Image source={{ uri: avatarUrl }} style={styles.image} />
+                      <Image source={{ uri: avatarUrl }} style={styles.cardImage} />
                     ) : (
-                      <View style={styles.imageFallback}>
-                        <Text style={styles.imageFallbackText}>{initials}</Text>
-                      </View>
+                      <View style={styles.cardImageFallback} />
                     )}
                   </View>
 
-                  {/* Content */}
-                  <View style={styles.cardBody}>
-                    <Pressable onPress={() => onOpenArtist(s.artist_id)} style={{ alignSelf: "flex-start" }}>
-                      <Text style={styles.name} numberOfLines={1}>
-                        {displayName}
-                      </Text>
-                    </Pressable>
+                  {/* RIGHT CONTENT */}
+                    <View style={styles.cardRight}>
+                      <View style={styles.cardTopRow}>
+                        <View style={{ flex: 1, paddingRight: 10 }}>
+                          <Text style={styles.cardName} numberOfLines={1}>
+                            {displayName}
+                            {pronouns ? <Text style={styles.cardPronouns}> {pronouns}</Text> : null}
+                          </Text>
 
-                    <Text style={styles.meta} numberOfLines={2}>
-                      {compactMeta(s)}
-                    </Text>
+                          {!!metaLine && (
+                            <Text style={styles.cardMeta} numberOfLines={2}>
+                              {metaLine}
+                            </Text>
+                          )}
+                        </View>
+                      </View>
 
-                    <View style={styles.bottomRow}>
-                      <Text style={styles.price}>{formatPrice(s.price_cents)}</Text>
+                      {/* ✅ bottom row: price left, rating right */}
+                      <View style={styles.cardBottomRow}>
+                        <Text style={styles.cardPrice}>{priceText}</Text>
 
-                      <View style={styles.rating}>
-                        <Ionicons name="star" size={14} color={BLACK} />
-                        <Text style={styles.ratingText}>{rating.toFixed(1)}</Text>
+                        <View style={styles.cardRating}>
+                          <Ionicons name="star" size={14} color={BLACK} />
+                          <Text style={styles.cardRatingText}>{rating.toFixed(1)}</Text>
+                        </View>
                       </View>
                     </View>
-                  </View>
                 </Pressable>
               );
             })}
@@ -376,11 +381,28 @@ export default function MarketplaceScreen({
   );
 }
 
+const CARD_HEIGHT = 102;
+const CARD_RADIUS = 22;
+const IMAGE_W = 98;
+
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: WHITE, // ✅ white background like your target screenshots
+    backgroundColor: WHITE,
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
+  },
+
+  cardBottomRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 10,
+  },
+
+  cardPrice: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: BLACK,
   },
 
   screen: {
@@ -404,7 +426,6 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     alignItems: "center",
   },
-
   chip: {
     flexDirection: "row",
     alignItems: "center",
@@ -415,25 +436,10 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     alignSelf: "flex-start",
   },
-  chipPrimary: {
-    backgroundColor: BLACK,
-    borderWidth: 1,
-    borderColor: BLACK,
-  },
-  chipOutline: {
-    backgroundColor: "transparent",
-    borderWidth: 1,
-    borderColor: CHIP_BORDER,
-  },
-  chipText: {
-    fontWeight: "900",
-    fontSize: 13,
-    color: BLACK,
-    flexShrink: 1,
-  },
-  chipTextPrimary: {
-    color: WHITE,
-  },
+  chipPrimary: { backgroundColor: BLACK, borderWidth: 1, borderColor: BLACK },
+  chipOutline: { backgroundColor: "transparent", borderWidth: 1, borderColor: CHIP_BORDER },
+  chipText: { fontWeight: "900", fontSize: 13, color: BLACK, flexShrink: 1 },
+  chipTextPrimary: { color: WHITE },
   chipCloseBtn: {
     width: 26,
     height: 26,
@@ -442,120 +448,116 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
-  viewToggleRow: {
+  toggleRow: {
     flexDirection: "row",
     justifyContent: "center",
-    alignItems: "center",
-    gap: 16,
-    paddingBottom: 10,
+    gap: 18,
+    marginTop: 4,
+    marginBottom: 8,
   },
-  viewToggleBtn: {
+  toggleBtn: {
     paddingVertical: 6,
-    paddingHorizontal: 14,
+    paddingHorizontal: 10,
     borderRadius: 999,
-    backgroundColor: "transparent",
   },
-  viewToggleBtnActive: {
-    backgroundColor: "rgba(0,0,0,0.05)",
-  },
-  viewToggleText: {
+  toggleBtnActive: {},
+  toggleText: {
     fontSize: 12,
     fontWeight: "800",
     color: MUTED_2,
+    textDecorationLine: "underline",
+    textDecorationColor: "rgba(0,0,0,0.25)",
   },
-  viewToggleTextActive: {
+  toggleTextActive: {
     color: BLACK,
+    textDecorationColor: "rgba(0,0,0,0.55)",
   },
 
-  list: { gap: 12, paddingTop: 6, paddingBottom: 10 },
+  mapPlaceholder: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingBottom: 80,
+  },
+  mapPlaceholderTitle: { fontSize: 18, fontWeight: "900", color: BLACK },
+  mapPlaceholderText: { marginTop: 6, fontSize: 13, fontWeight: "700", color: MUTED },
+
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
+  list: { gap: 14, paddingTop: 10, paddingBottom: 10 },
 
-  // ✅ pink cards + left image spanning height
+  // ✅ CARD (matches your reference)
   card: {
-    flexDirection: "row",
-    alignItems: "stretch",
+    height: CARD_HEIGHT,
     backgroundColor: PINK_CARD,
-    borderRadius: 22,
-    padding: 12,
-    shadowColor: SHADOW,
-    shadowOpacity: 1,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
+    borderRadius: CARD_RADIUS,
+    flexDirection: "row",
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: BORDER,
   },
 
-  imageWrap: {
-    width: 86,
-    borderRadius: 18,
-    overflow: "hidden",
-    backgroundColor: AVATAR_FALLBACK,
+  // left image spans full height
+  cardImageWrap: {
+    width: IMAGE_W,
+    height: "100%",
+    backgroundColor: "rgba(0,0,0,0.08)",
   },
-  image: {
+  cardImage: {
     width: "100%",
     height: "100%",
     resizeMode: "cover",
   },
-  imageFallback: {
+  cardImageFallback: {
     flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  imageFallbackText: {
-    fontSize: 18,
-    fontWeight: "900",
-    color: "rgba(0,0,0,0.70)",
-    letterSpacing: 0.5,
+    backgroundColor: "rgba(0,0,0,0.10)",
   },
 
-  cardBody: {
+  // right content spacing
+  cardRight: {
     flex: 1,
-    marginLeft: 12,
-    backgroundColor: PINK_CARD_SOFT, // gives the “pink card with softer inner feel”
-    borderRadius: 18,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingLeft: 12,
+    paddingRight: 14,
+    paddingTop: 12,
+    paddingBottom: 12,
     justifyContent: "space-between",
   },
 
-  name: {
-    fontSize: 14,
-    fontWeight: "900",
-    color: BLACK,
+  cardTopRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
   },
 
-  meta: {
+  cardName: {
+    fontSize: 15,
+    fontWeight: "900",
+    color: BLACK,
+    lineHeight: 18,
+  },
+  cardPronouns: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "rgba(0,0,0,0.75)",
+  },
+
+  cardMeta: {
+    marginTop: 6,
     fontSize: 12,
     fontWeight: "700",
     color: MUTED,
-    marginTop: 4,
     lineHeight: 16,
   },
 
-  bottomRow: {
-    marginTop: 10,
-    flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "space-between",
-  },
-
-  price: {
-    fontSize: 13,
-    fontWeight: "900",
-    color: BLACK,
-  },
-
-  rating: {
+  cardRating: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.55)",
+    paddingLeft: 8,
+    paddingRight: 0,
+    paddingTop: 2,
   },
-  ratingText: {
-    fontWeight: "900",
+  cardRatingText: {
     fontSize: 12,
+    fontWeight: "900",
     color: BLACK,
   },
 

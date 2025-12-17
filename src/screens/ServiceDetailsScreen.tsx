@@ -17,7 +17,7 @@ import { createBooking } from "../lib/bookings";
 
 const PINK = "#f9dfdd";
 const BLACK = "#000000";
-const OFF_WHITE = "#FFFFEF";
+const OFF_WHITE = "#FFFFfF";
 
 function formatPrice(cents: number) {
   return `$${(cents / 100).toFixed(2)}`;

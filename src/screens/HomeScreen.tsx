@@ -17,7 +17,7 @@ import { createService, listActiveServices } from "../lib/services";
 
 const PINK = "#f9dfdd";
 const BLACK = "#000000";
-const OFF_WHITE = "#FFFFEF";
+const OFF_WHITE = "#FFFFFF";
 
 export default function HomeScreen() {
   const { user, signOut } = useAuth();

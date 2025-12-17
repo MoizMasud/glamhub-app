@@ -23,7 +23,7 @@ import { signIn, signUp, UserRole } from "../lib/auth";
 
 const PINK = "#f9dfdd";
 const BLACK = "#000000";
-const OFF_WHITE = "#FFFFEF";
+const OFF_WHITE = "#FFFFFF";
 
 type ThemeMode = "light" | "dark";
 const theme: ThemeMode = "light";

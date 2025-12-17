@@ -676,7 +676,7 @@ export default function SearchScreen({
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: OFF_WHITE,
+    backgroundColor: PINK,
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
   },
 
@@ -737,7 +737,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.06)",
+    backgroundColor: OFF_WHITE,
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.10)",
   },
@@ -773,7 +773,7 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     paddingVertical: 12,
     paddingHorizontal: 14,
-    backgroundColor: "rgba(255,255,255,0.38)",
+    backgroundColor: OFF_WHITE,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
