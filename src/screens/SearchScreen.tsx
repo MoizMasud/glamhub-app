@@ -13,7 +13,6 @@ import {
   Keyboard,
   ScrollView,
   Alert,
-  Switch,
   ActivityIndicator,
 } from "react-native";
 import Slider from "@react-native-community/slider";
@@ -28,11 +27,13 @@ try {
 
 const PINK = "#f6d6d6";
 const BLACK = "#000000";
-const OFF_WHITE = "#FFFFEF";
+const OFF_WHITE = "#FFFFFF";
 const MUTED = "rgba(0,0,0,0.55)";
 const BORDER = "rgba(0,0,0,0.14)";
 const SURFACE = "rgba(255,255,255,0.70)";
 const SURFACE_2 = "rgba(255,255,255,0.96)";
+
+const FOOTER_SAFE_SPACE = 96; // ✅ keeps primary button above your bottom footer
 
 export type MarketplaceFilters = {
   service?: string;
@@ -64,21 +65,57 @@ function parseMoneyToCents(input: string): number | undefined {
   return Math.round(n * 100);
 }
 
-function fmtPrice(cents?: number) {
-  if (typeof cents !== "number") return "—";
-  return `$${(cents / 100).toFixed(0)}`;
+function centsToInput(cents?: number) {
+  if (typeof cents !== "number") return "";
+  return String(Math.round(cents / 100));
 }
 
 function fmtRating(r: number) {
   return r.toFixed(1);
 }
 
+// --- helpers for “city or postal” feel ---
+function isLikelyPostalCode(q: string) {
+  const s = q.trim().toUpperCase();
+  // Canada: A1A 1A1 (allow no-space), US: 12345 or 12345-6789
+  const ca = /^[A-Z]\d[A-Z]\s?\d[A-Z]\d$/.test(s);
+  const us = /^\d{5}(-\d{4})?$/.test(s);
+  return ca || us;
+}
+
+function normalizePostal(q: string) {
+  const s = q.trim().toUpperCase().replace(/\s+/g, "");
+  // format CA as A1A 1A1
+  if (/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(s)) return `${s.slice(0, 3)} ${s.slice(3)}`;
+  return q.trim();
+}
+
+// --- Photon label builder (cleaner than full display_name dumps) ---
+function photonLabel(p: any) {
+  const props = p?.properties ?? {};
+  const name = props?.name;
+  const city = props?.city;
+  const state = props?.state || props?.region;
+  const country = props?.country;
+
+  const parts = [name, city, state, country].filter(Boolean);
+
+  // de-dupe adjacent duplicates (sometimes name === city)
+  const cleaned: string[] = [];
+  for (const part of parts) {
+    if (cleaned.length === 0 || cleaned[cleaned.length - 1] !== part) cleaned.push(part);
+  }
+  return cleaned.join(", ");
+}
+
 export default function SearchScreen({
   services = ["Any", "Hair", "Makeup", "Nails", "Barber", "Skincare", "Lashes", "Brows"],
+  initialFilters,
   onSearch,
   onSkip,
 }: {
   services?: string[];
+  initialFilters?: MarketplaceFilters | null;
   onSearch: (filters: MarketplaceFilters) => void;
   onSkip?: () => void;
 }) {
@@ -98,26 +135,131 @@ export default function SearchScreen({
   const [loadingSuggest, setLoadingSuggest] = useState(false);
   const [suggestSlow, setSuggestSlow] = useState(false);
 
+  // for “AutoTrader default location”
+  const [defaultLocLoading, setDefaultLocLoading] = useState(false);
+  const defaultLocTriedRef = useRef(false);
+
+  // keep last known GPS coords so autocomplete can be biased locally even when locationCoords is cleared while typing
+  const lastBiasCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
+
+  // ✅ advanced filters state stays the same (just moves into a modal)
   const [advanced, setAdvanced] = useState(false);
   const [minRating, setMinRating] = useState(4.0);
   const [maxDistanceKm, setMaxDistanceKm] = useState(15);
+  const [advancedModalOpen, setAdvancedModalOpen] = useState(false);
 
   const minC = useMemo(() => parseMoneyToCents(minPrice), [minPrice]);
   const maxC = useMemo(() => parseMoneyToCents(maxPrice), [maxPrice]);
 
-  // --- Faster typeahead: shorter debounce + cache + hard timeout + stop spinner if slow ---
+  // Hydrate UI from last-used filters
+  const hydratedRef = useRef(false);
   useEffect(() => {
-    const q = locationText.trim();
+    if (!initialFilters) return;
+    if (hydratedRef.current) return;
+    hydratedRef.current = true;
 
-    // only suggest when user is typing (and coords not locked)
-    if (q.length < 3 || locationCoords) {
+    const f = initialFilters;
+
+    const svc = f.service?.trim();
+    if (svc && services.includes(svc)) setService(svc);
+    else setService(services?.[0] ?? "Any");
+
+    setMinPrice(centsToInput(f.minPriceCents));
+    setMaxPrice(centsToInput(f.maxPriceCents));
+
+    setLocationText(f.locationText ?? "");
+    setLocationCoords(f.locationCoords ?? null);
+
+    if (f.locationCoords) lastBiasCoordsRef.current = f.locationCoords;
+
+    const advOn = typeof f.minRating === "number" || typeof f.maxDistanceKm === "number";
+    setAdvanced(advOn);
+    if (typeof f.minRating === "number") setMinRating(f.minRating);
+    else setMinRating(4.0);
+    if (typeof f.maxDistanceKm === "number") setMaxDistanceKm(f.maxDistanceKm);
+    else setMaxDistanceKm(15);
+
+    setSuggestions([]);
+    setLoadingSuggest(false);
+    setSuggestSlow(false);
+  }, [initialFilters, services]);
+
+  useEffect(() => {
+    hydratedRef.current = false;
+  }, [initialFilters]);
+
+  // Default to current location, only if user hasn’t set one already
+  useEffect(() => {
+    const shouldAutofill =
+      !defaultLocTriedRef.current &&
+      !locationCoords &&
+      !locationText?.trim() &&
+      !(initialFilters?.locationCoords || initialFilters?.locationText);
+
+    if (!shouldAutofill) return;
+
+    defaultLocTriedRef.current = true;
+
+    (async () => {
+      if (!ExpoLocation) return;
+
+      try {
+        setDefaultLocLoading(true);
+
+        const perm = await ExpoLocation.getForegroundPermissionsAsync();
+        let status = perm?.status;
+
+        if (status !== "granted") {
+          const req = await ExpoLocation.requestForegroundPermissionsAsync();
+          status = req?.status;
+        }
+
+        if (status !== "granted") return;
+
+        const pos = await ExpoLocation.getCurrentPositionAsync({
+          accuracy: ExpoLocation.Accuracy.Low,
+        });
+
+        const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setLocationCoords(coords);
+        lastBiasCoordsRef.current = coords;
+
+        try {
+          const rev = await ExpoLocation.reverseGeocodeAsync({
+            latitude: coords.lat,
+            longitude: coords.lng,
+          });
+          const r0 = rev?.[0];
+          const city = r0?.city || r0?.subregion || r0?.region || "";
+          setLocationText(city ? `Near ${city}` : "Near me");
+        } catch {
+          setLocationText("Near me");
+        }
+      } catch {
+        // ignore silently; typing still works
+      } finally {
+        setDefaultLocLoading(false);
+      }
+    })();
+  }, [initialFilters, locationCoords, locationText]);
+
+  // Typeahead using Photon (Komoot)
+  useEffect(() => {
+    const qRaw = locationText.trim();
+
+    // Don’t suggest if:
+    // - too short
+    // - location is locked (coords set)
+    if (qRaw.length < 3 || locationCoords) {
       setSuggestions([]);
       setLoadingSuggest(false);
       setSuggestSlow(false);
       return;
     }
 
+    const q = isLikelyPostalCode(qRaw) ? normalizePostal(qRaw) : qRaw;
     const key = q.toLowerCase();
+
     const cached = locationCache.get(key);
     if (cached) {
       setSuggestions(cached);
@@ -128,56 +270,57 @@ export default function SearchScreen({
 
     const controller = new AbortController();
 
-    // debounce: 150ms feels much snappier
     const debounceT = setTimeout(async () => {
       setLoadingSuggest(true);
       setSuggestSlow(false);
 
-      // show a “slow network” hint quickly so it never feels stuck
-      const slowT = setTimeout(() => setSuggestSlow(true), 700);
-
-      // hard timeout so it never spins forever
-      const timeoutT = setTimeout(() => controller.abort(), 2500);
+      const slowT = setTimeout(() => setSuggestSlow(true), 600);
+      const timeoutT = setTimeout(() => controller.abort(), 2200);
 
       try {
-        const url =
-          "https://nominatim.openstreetmap.org/search?" +
-          `q=${encodeURIComponent(q)}` +
-          "&format=json&addressdetails=1&limit=6";
+        const bias = lastBiasCoordsRef.current;
+
+        let query = q;
+        if (isLikelyPostalCode(qRaw)) query = `${q} Canada`;
+
+        let url = "https://photon.komoot.io/api/?" + `q=${encodeURIComponent(query)}` + `&limit=6` + `&lang=en`;
+
+        if (bias) {
+          url += `&lat=${encodeURIComponent(String(bias.lat))}&lon=${encodeURIComponent(String(bias.lng))}`;
+        }
 
         const res = await fetch(url, {
           signal: controller.signal,
-          headers: {
-            "User-Agent": "GlamHubApp/1.0 (search)",
-            "Accept-Language": "en",
-          },
+          headers: { Accept: "application/json" },
         });
 
         const json = await res.json();
-        const raw = Array.isArray(json) ? json : [];
+        const features = Array.isArray(json?.features) ? json.features : [];
 
-        const items = raw
-          .map((x: any) => {
-            const label = x?.display_name as string;
-            const lat = Number(x?.lat);
-            const lng = Number(x?.lon);
+        const items: LocationSuggestion[] = features
+          .map((f: any) => {
+            const coords = f?.geometry?.coordinates;
+            const lng = Number(coords?.[0]);
+            const lat = Number(coords?.[1]);
+            const label = photonLabel(f);
+
             if (!label || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
 
-            const s: LocationSuggestion = {
-              id: String(x?.place_id ?? `${lat},${lng},${label}`),
-              label,
-              lat,
-              lng,
-            };
-            return s;
+            const id = String(
+              f?.properties?.osm_id ??
+                f?.properties?.place_id ??
+                f?.properties?.osm_key ??
+                `${lat},${lng},${label}`
+            );
+
+            return { id, label, lat, lng } as LocationSuggestion;
           })
           .filter((v: LocationSuggestion | null): v is LocationSuggestion => v !== null)
           .slice(0, 6);
 
         locationCache.set(key, items);
         setSuggestions(items);
-      } catch (e: any) {
-        // Abort = either new keystroke OR timeout; just don’t show spinner forever
+      } catch {
         setSuggestions([]);
       } finally {
         clearTimeout(slowT);
@@ -185,7 +328,7 @@ export default function SearchScreen({
         setLoadingSuggest(false);
         setSuggestSlow(false);
       }
-    }, 150);
+    }, 140);
 
     return () => {
       clearTimeout(debounceT);
@@ -212,6 +355,7 @@ export default function SearchScreen({
 
       const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
       setLocationCoords(coords);
+      lastBiasCoordsRef.current = coords;
       setSuggestions([]);
 
       try {
@@ -222,20 +366,21 @@ export default function SearchScreen({
 
         const r0 = rev?.[0];
         const city = r0?.city || r0?.subregion || r0?.region || "";
-        setLocationText(city || "Current location");
+        setLocationText(city ? `Near ${city}` : "Near me");
       } catch {
-        setLocationText("Current location");
+        setLocationText("Near me");
       }
 
       Keyboard.dismiss();
     } catch {
-      Alert.alert("Couldn’t get location", "Try again or type your city.");
+      Alert.alert("Couldn’t get location", "Try again or type your city/postal code.");
     }
   };
 
   const pickSuggestion = (s: LocationSuggestion) => {
     setLocationText(s.label);
     setLocationCoords({ lat: s.lat, lng: s.lng });
+    lastBiasCoordsRef.current = { lat: s.lat, lng: s.lng };
     setSuggestions([]);
     Keyboard.dismiss();
   };
@@ -296,30 +441,109 @@ export default function SearchScreen({
     </Modal>
   );
 
+  const AdvancedModal = () => (
+    <Modal transparent animationType="fade" visible={advancedModalOpen} onRequestClose={() => setAdvancedModalOpen(false)}>
+      <Pressable style={styles.sheetBackdrop} onPress={() => setAdvancedModalOpen(false)} />
+      <View style={styles.advModal}>
+        <View style={styles.sheetHandle} />
+        <Text style={styles.sheetTitle}>Advanced filters</Text>
+
+        <View style={{ padding: 14, gap: 14 }}>
+          <View style={styles.card}>
+            <View style={styles.rowBetween}>
+              <Text style={styles.label}>Minimum rating</Text>
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>{fmtRating(minRating)}★</Text>
+              </View>
+            </View>
+
+            <Slider
+              style={{ width: "100%", height: 36 }}
+              minimumValue={0}
+              maximumValue={5}
+              step={0.5}
+              value={minRating}
+              onValueChange={(v) => setMinRating(v)}
+              minimumTrackTintColor={BLACK}
+              maximumTrackTintColor={"rgba(0,0,0,0.15)"}
+              thumbTintColor={BLACK}
+            />
+
+            <View style={{ height: 10 }} />
+
+            <View style={styles.rowBetween}>
+              <Text style={styles.label}>Max distance</Text>
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>{Math.round(maxDistanceKm)} km</Text>
+              </View>
+            </View>
+
+            <Slider
+              style={{ width: "100%", height: 36 }}
+              minimumValue={0}
+              maximumValue={100}
+              step={1}
+              value={maxDistanceKm}
+              onValueChange={(v) => setMaxDistanceKm(v)}
+              minimumTrackTintColor={BLACK}
+              maximumTrackTintColor={"rgba(0,0,0,0.15)"}
+              thumbTintColor={BLACK}
+            />
+          </View>
+
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <Pressable
+              onPress={() => {
+                // turn off advanced and reset defaults
+                setAdvanced(false);
+                setMinRating(4.0);
+                setMaxDistanceKm(15);
+                setAdvancedModalOpen(false);
+              }}
+              style={[styles.modalBtn, styles.modalBtnGhost]}
+            >
+              <Text style={[styles.modalBtnText, styles.modalBtnTextGhost]}>Clear</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {
+                // enable advanced when user saves
+                setAdvanced(true);
+                setAdvancedModalOpen(false);
+              }}
+              style={[styles.modalBtn, styles.modalBtnPrimary]}
+            >
+              <Text style={[styles.modalBtnText, styles.modalBtnTextPrimary]}>Save</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const advancedSummary = advanced ? `${fmtRating(minRating)}★ • ${Math.round(maxDistanceKm)} km` : "Off";
+
   return (
     <SafeAreaView style={styles.safe}>
       <ServiceSheet />
+      <AdvancedModal />
 
       <View style={styles.root}>
-        {/* Header */}
         <View style={styles.header}>
           <View>
             <Text style={styles.h1}>Search</Text>
-            <Text style={styles.sub}>Find the right artist, fast.</Text>
           </View>
         </View>
 
-        {/* Scrollable content (no outer Touchable wrapper -> scrolling feels effortless) */}
         <ScrollView
           style={{ flex: 1 }}
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: FOOTER_SAFE_SPACE }]}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           nestedScrollEnabled
           showsVerticalScrollIndicator={false}
           onScrollBeginDrag={() => Keyboard.dismiss()}
         >
-          {/* Primary filters */}
           <View>
             <Text style={styles.label}>Service</Text>
             <Pressable
@@ -365,7 +589,10 @@ export default function SearchScreen({
             <View style={{ height: 14 }} />
 
             <View style={styles.rowBetween}>
-              <Text style={styles.label}>Location</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Text style={styles.label}>Location</Text>
+                {defaultLocLoading && <ActivityIndicator size="small" />}
+              </View>
 
               <Pressable onPress={useMyLocation} style={styles.secondaryBtn}>
                 <Text style={styles.secondaryBtnText}>Use my location</Text>
@@ -374,7 +601,7 @@ export default function SearchScreen({
 
             <View style={{ position: "relative" }}>
               <TextInput
-                placeholder="City or address…"
+                placeholder="City or postal code…"
                 value={locationText}
                 onChangeText={(t) => {
                   setLocationText(t);
@@ -415,78 +642,28 @@ export default function SearchScreen({
             </View>
           </View>
 
-          {/* Advanced toggle */}
-          <View style={[styles.advRow, advanced && styles.advRowOn]}>
+          {/* ✅ Advanced filters button (replaces toggle row) */}
+          <Pressable
+            onPress={() => {
+              Keyboard.dismiss();
+              setAdvancedModalOpen(true);
+            }}
+            style={[styles.advBtn, advanced && styles.advBtnOn]}
+          >
             <View>
               <Text style={[styles.advLabel, advanced && styles.advLabelOn]}>Advanced filters</Text>
               <Text style={styles.advSub}>Rating + distance</Text>
             </View>
 
             <View style={styles.advRight}>
-              <Text style={[styles.advState, advanced && styles.advStateOn]}>{advanced ? "ON" : "OFF"}</Text>
-              <Switch
-                value={advanced}
-                onValueChange={setAdvanced}
-                trackColor={{ false: "rgba(0,0,0,0.12)", true: "rgba(0,0,0,0.35)" }}
-                thumbColor={BLACK}
-              />
+              <Text style={[styles.advValue, advanced && styles.advValueOn]}>{advancedSummary}</Text>
+              <Text style={styles.advChevron}>›</Text>
             </View>
-          </View>
-
-          {advanced && (
-            <View style={styles.card}>
-              <View style={styles.rowBetween}>
-                <Text style={styles.label}>Minimum rating</Text>
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{fmtRating(minRating)}★</Text>
-                </View>
-              </View>
-
-              <Slider
-                style={{ width: "100%", height: 36 }}
-                minimumValue={0}
-                maximumValue={5}
-                step={0.5}
-                value={minRating}
-                onValueChange={(v) => setMinRating(v)}
-                minimumTrackTintColor={BLACK}
-                maximumTrackTintColor={"rgba(0,0,0,0.15)"}
-                thumbTintColor={BLACK}
-              />
-
-              <View style={{ height: 10 }} />
-
-              <View style={styles.rowBetween}>
-                <Text style={styles.label}>Max distance</Text>
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{Math.round(maxDistanceKm)} km</Text>
-                </View>
-              </View>
-
-              <Slider
-                style={{ width: "100%", height: 36 }}
-                minimumValue={0}
-                maximumValue={100}
-                step={1}
-                value={maxDistanceKm}
-                onValueChange={(v) => setMaxDistanceKm(v)}
-                minimumTrackTintColor={BLACK}
-                maximumTrackTintColor={"rgba(0,0,0,0.15)"}
-                thumbTintColor={BLACK}
-              />
-
-              <Text style={styles.note}>
-                Distance works best when the search location has coordinates (pick a suggestion or use GPS).
-              </Text>
-            </View>
-          )}
-
-          {/* spacer so content scrolls above footer */}
-          <View />
+          </Pressable>
         </ScrollView>
 
-        {/* Fixed footer */}
-        <View>
+        {/* ✅ Search button moved up above footer */}
+        <View style={[styles.primaryWrap, { paddingBottom: FOOTER_SAFE_SPACE - 34 }]}>
           <Pressable onPress={submit} style={styles.primaryBtn}>
             <Text style={styles.primaryText}>Search</Text>
           </Pressable>
@@ -514,17 +691,7 @@ const styles = StyleSheet.create({
   h1: { fontSize: 30, fontWeight: "900", color: BLACK },
   sub: { marginTop: 3, color: MUTED, fontWeight: "700" },
 
-  pillBtn: {
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    backgroundColor: SURFACE,
-  },
-  pillText: { fontWeight: "900", color: BLACK },
-
-  scrollContent: { paddingBottom: 0, gap: 12 },
+  scrollContent: { gap: 12 },
 
   card: {
     backgroundColor: SURFACE,
@@ -576,8 +743,6 @@ const styles = StyleSheet.create({
   },
   secondaryBtnText: { fontWeight: "900", color: BLACK, opacity: 0.85, fontSize: 12 },
 
-  hint: { marginTop: 10, color: MUTED, fontWeight: "700", fontSize: 12 },
-
   // Suggestions
   suggestBox: {
     position: "absolute",
@@ -601,8 +766,8 @@ const styles = StyleSheet.create({
   suggestLoading: { padding: 12, flexDirection: "row", gap: 10, alignItems: "center" },
   suggestLoadingText: { fontWeight: "800", color: BLACK, opacity: 0.7 },
 
-  // Advanced toggle
-  advRow: {
+  // ✅ Advanced button (replaces toggle)
+  advBtn: {
     borderWidth: 1,
     borderColor: BORDER,
     borderRadius: 18,
@@ -613,13 +778,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  advRowOn: { backgroundColor: PINK, borderColor: "rgba(0,0,0,0.20)" },
+  advBtnOn: { backgroundColor: PINK, borderColor: "rgba(0,0,0,0.20)" },
   advLabel: { fontWeight: "900", color: BLACK, opacity: 0.85, fontSize: 14 },
   advLabelOn: { opacity: 1 },
   advSub: { marginTop: 2, color: MUTED, fontWeight: "700", fontSize: 12 },
   advRight: { flexDirection: "row", alignItems: "center", gap: 10 },
-  advState: { fontWeight: "900", color: BLACK, opacity: 0.6 },
-  advStateOn: { opacity: 0.9 },
+  advValue: { fontWeight: "900", color: BLACK, opacity: 0.6, fontSize: 12 },
+  advValueOn: { opacity: 0.9 },
+  advChevron: { fontWeight: "900", color: MUTED, fontSize: 18, marginTop: -2 },
 
   badge: {
     backgroundColor: "rgba(0,0,0,0.06)",
@@ -631,52 +797,25 @@ const styles = StyleSheet.create({
   },
   badgeText: { fontWeight: "900", color: BLACK, opacity: 0.85 },
 
-  note: { marginTop: 8, color: MUTED, fontWeight: "700", fontSize: 12 },
-
-  footer: {
-    position: "absolute",
-    left: 16,
-    right: 16,
-    bottom: 14,
-    backgroundColor: OFF_WHITE,
-    paddingTop: 10,
-    paddingBottom: 8,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: BORDER,
-    ...(Platform.OS === "ios"
-      ? {
-          shadowColor: "#000",
-          shadowOpacity: 0.08,
-          shadowRadius: 12,
-          shadowOffset: { width: 0, height: 8 },
-        }
-      : { elevation: 6 }),
+  // Primary footer area (button lifted above the app footer)
+  primaryWrap: {
+    paddingTop: 8,
   },
-
-  summaryRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", paddingHorizontal: 12, paddingBottom: 10 },
-  summaryChip: {
-    backgroundColor: "rgba(0,0,0,0.06)",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.10)",
-  },
-  summaryChipText: { fontWeight: "900", color: BLACK, opacity: 0.8, fontSize: 12 },
-
   primaryBtn: {
     backgroundColor: BLACK,
     paddingVertical: 14,
     borderRadius: 16,
     alignItems: "center",
     marginHorizontal: 12,
-    marginBottom: 6,
   },
   primaryText: { color: OFF_WHITE, fontWeight: "900", fontSize: 16, letterSpacing: 0.4 },
 
-  // Service sheet
+  skipBtn: { marginTop: 10, alignItems: "center" },
+  skipText: { color: MUTED, fontWeight: "900" },
+
+  // Service sheet + advanced modal share the same backdrop style
   sheetBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.25)" },
+
   sheet: {
     position: "absolute",
     left: 12,
@@ -688,6 +827,20 @@ const styles = StyleSheet.create({
     borderColor: BORDER,
     overflow: "hidden",
   },
+
+  // Advanced modal uses the same bottom-sheet look
+  advModal: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    bottom: 12,
+    borderRadius: 20,
+    backgroundColor: OFF_WHITE,
+    borderWidth: 1,
+    borderColor: BORDER,
+    overflow: "hidden",
+  },
+
   sheetHandle: {
     alignSelf: "center",
     width: 44,
@@ -708,4 +861,25 @@ const styles = StyleSheet.create({
   sheetItemActive: { backgroundColor: PINK, borderColor: "rgba(0,0,0,0.18)" },
   sheetItemText: { fontWeight: "900", color: BLACK, opacity: 0.8 },
   sheetItemTextActive: { opacity: 1 },
+
+  // modal buttons
+  modalBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+  },
+  modalBtnPrimary: {
+    backgroundColor: BLACK,
+    borderColor: BLACK,
+  },
+  modalBtnGhost: {
+    backgroundColor: "rgba(0,0,0,0.04)",
+    borderColor: "rgba(0,0,0,0.10)",
+  },
+  modalBtnText: { fontWeight: "900" },
+  modalBtnTextPrimary: { color: OFF_WHITE },
+  modalBtnTextGhost: { color: BLACK, opacity: 0.85 },
 });

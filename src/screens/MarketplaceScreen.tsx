@@ -46,7 +46,7 @@ function fakeRating(id: string) {
 
 function titleFromFilters(filters?: MarketplaceFilters | null) {
   const svc = (filters as any)?.service?.trim?.();
-  if (svc) return `Filter ${svc}`;
+  if (svc) return `Filter ${svc} Services`;
   return "Filter Services";
 }
 
@@ -75,6 +75,20 @@ function getInitials(name?: string | null) {
   return out || "GH";
 }
 
+// ✅ NEW: make location pill show only "City" (not full address string)
+function compactCityLabel(raw?: string) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  // remove our "Near " prefix if present
+  const noNear = s.replace(/^near\s+/i, "").trim();
+  // if it has commas, take the first chunk ("Toronto" from "Toronto, Ontario, Canada")
+  const first = noNear.split(",")[0]?.trim() ?? "";
+  // if it still looks long, fall back to first 2 words max
+  if (first.length <= 20) return first || noNear;
+  const words = noNear.split(/\s+/).filter(Boolean);
+  return words.slice(0, 2).join(" ");
+}
+
 type ClearFlags = {
   service?: boolean;
   price?: boolean;
@@ -95,7 +109,6 @@ export default function MarketplaceScreen({
   onOpenArtist: (artistId: string) => void;
   onOpenService: (serviceId: string) => void;
 
-  // ✅ REQUIRED FOR APP.TSX
   filters?: MarketplaceFilters | null;
   onEditFilters?: () => void;
 }) {
@@ -103,16 +116,14 @@ export default function MarketplaceScreen({
   const [services, setServices] = useState<MarketplaceService[]>([]);
   const [clears, setClears] = useState<ClearFlags>({});
 
-  // ✅ auth-aware header icon (login icon when logged out, burger when logged in)
+  // auth-aware header icon (login icon when logged out, burger when logged in)
   const [isLoggedIn, setIsLoggedIn] = useState(false);
 
   useEffect(() => {
-    // initial check
     supabase.auth.getUser().then(({ data }) => {
       setIsLoggedIn(!!data.user);
     });
 
-    // keep in sync on login/logout
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       setIsLoggedIn(!!session?.user);
     });
@@ -131,7 +142,14 @@ export default function MarketplaceScreen({
     const f: any = { ...(filters ?? {}) };
 
     if (clears.service) delete f.service;
-    if (clears.location) delete f.locationText;
+
+    // ✅ clear distance/location properly
+    if (clears.location) {
+      delete f.locationText;
+      delete f.locationCoords;
+      delete f.maxDistanceKm;
+    }
+
     if (clears.rating) delete f.minRating;
 
     if (clears.price) {
@@ -216,10 +234,22 @@ export default function MarketplaceScreen({
       });
     }
 
-    if (f?.locationText) {
+    // ✅ Location chip: only show city + distance (if present)
+    const hasLoc = !!f?.locationText;
+    const hasKm = typeof f?.maxDistanceKm === "number";
+
+    if (hasLoc || hasKm) {
+      const kmText = hasKm ? `${Math.round(Number(f.maxDistanceKm))} km` : "";
+      const cityText = hasLoc ? compactCityLabel(f.locationText) : "";
+
+      // if both exist -> "15 km • Toronto"
+      // if only city -> "Toronto"
+      // if only km -> "15 km"
+      const label = [kmText, cityText].filter(Boolean).join(" • ");
+
       out.push({
         key: "location",
-        label: `Distance • ${String(f.locationText)}`,
+        label,
         kind: "outline",
         onClose: () => setClears((p) => ({ ...p, location: true })),
       });
@@ -228,7 +258,7 @@ export default function MarketplaceScreen({
     if (typeof f?.minRating === "number") {
       out.push({
         key: "rating",
-        label: `${Number(f.minRating).toFixed(1)}★+`,
+        label: `Rating ${Number(f.minRating).toFixed(1)}★`,
         kind: "outline",
         onClose: () => setClears((p) => ({ ...p, rating: true })),
       });
@@ -240,35 +270,8 @@ export default function MarketplaceScreen({
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.screen}>
-        {/* Header: back — logo — (login icon OR burger menu) */}
-        <View style={styles.header}>
-          <Pressable onPress={onEditFilters} style={styles.headerBtn} hitSlop={10}>
-            <Ionicons name="chevron-back" size={22} color={BLACK} />
-          </Pressable>
-
-          <View style={styles.logoWrap}>
-            <Image source={GH_WHITE} style={styles.logo} resizeMode="contain" />
-          </View>
-
-          <Pressable
-            onPress={() => {
-              if (!isLoggedIn) onRequestSignIn?.();
-              else onOpenAccount();
-            }}
-            style={styles.headerBtn}
-            hitSlop={10}
-          >
-            <Ionicons
-              name={isLoggedIn ? "menu" : "person-circle-outline"}
-              size={24}
-              color={BLACK}
-            />
-          </Pressable>
-        </View>
-
         <Text style={styles.title}>{titleFromFilters(effectiveFilters)}</Text>
 
-        {/* ✅ Chips that WRAP (no overflow) */}
         {!!chips.length && (
           <View style={styles.chipsWrap}>
             {chips.map((c) => {
@@ -300,7 +303,7 @@ export default function MarketplaceScreen({
                     hitSlop={10}
                     style={styles.chipCloseBtn}
                   >
-                    <Ionicons name="close" size={16} color={isPrimary ? OFF_WHITE : BLACK} />
+                    <Ionicons name="close" size={14} color={isPrimary ? OFF_WHITE : BLACK} />
                   </Pressable>
                 </Pressable>
               );
@@ -321,7 +324,6 @@ export default function MarketplaceScreen({
 
               return (
                 <Pressable key={s.id} style={styles.card} onPress={() => onOpenService(s.id)}>
-                  {/* ✅ No Unsplash — clean initials avatar */}
                   <View style={styles.avatar}>
                     <Text style={styles.avatarText}>{initials}</Text>
                   </View>
@@ -351,7 +353,6 @@ export default function MarketplaceScreen({
 
             {!filtered.length && <Text style={styles.empty}>No results match your filters.</Text>}
 
-            {/* prevents TabBar overlap */}
             <View style={{ height: 110 }} />
           </ScrollView>
         )}
@@ -382,7 +383,6 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
 
-  // ✅ bigger logo like the screenshot (more prominent)
   logoWrap: {
     height: 56,
     width: 210,
@@ -402,7 +402,6 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
-  // ✅ WRAPPING chips container (no horizontal overflow)
   chipsWrap: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -411,14 +410,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
-  // ✅ pill with internal close icon
+  // ✅ smaller pills
   chip: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    height: 44,
-    paddingLeft: 16,
-    paddingRight: 10,
+    gap: 8,
+    height: 36,
+    paddingLeft: 12,
+    paddingRight: 8,
     borderRadius: 999,
     alignSelf: "flex-start",
   },
@@ -434,16 +433,17 @@ const styles = StyleSheet.create({
   },
   chipText: {
     fontWeight: "900",
-    fontSize: 14,
+    fontSize: 13,
     color: BLACK,
     flexShrink: 1,
   },
   chipTextPrimary: {
     color: OFF_WHITE,
   },
+  // ✅ smaller close target (still easy to tap)
   chipCloseBtn: {
-    width: 30,
-    height: 30,
+    width: 26,
+    height: 26,
     borderRadius: 999,
     alignItems: "center",
     justifyContent: "center",
@@ -463,7 +463,6 @@ const styles = StyleSheet.create({
     borderColor: BORDER,
   },
 
-  // ✅ initials avatar
   avatar: {
     width: 62,
     height: 62,
