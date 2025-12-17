@@ -12,12 +12,14 @@ import {
   ScrollView,
   ActivityIndicator,
   Modal,
-  Image,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
+import { Image as ExpoImage } from "expo-image";
 import { supabase } from "../lib/supabase";
 import { getMyProfile, setMyRole, updateMyProfile } from "../lib/profile";
+import * as Clipboard from "expo-clipboard";
+import { useAuth } from "../context/AuthContext";
 
 const PINK = "#f9dfdd";
 const BLACK = "#000000";
@@ -33,7 +35,7 @@ type MyProfile = {
   username?: string | null;
   city?: string | null;
   bio?: string | null;
-  avatar_url?: string | null;
+  avatar_url?: string | null; // store STORAGE PATH (e.g. uid/avatar_123.jpg) OR legacy URL
   email?: string | null;
 };
 
@@ -61,7 +63,17 @@ function extFromUri(uri: string) {
   return (m?.[1] ?? "jpg").toLowerCase();
 }
 
+function contentTypeFromExt(ext: string) {
+  if (ext === "png") return "image/png";
+  if (ext === "webp") return "image/webp";
+  if (ext === "heic") return "image/heic";
+  if (ext === "heif") return "image/heif";
+  return "image/jpeg";
+}
+
 export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
+  const { refreshProfile } = useAuth(); // ✅ added
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -71,6 +83,11 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
   const [username, setUsername] = useState("");
   const [city, setCity] = useState("");
   const [bio, setBio] = useState("");
+
+  // Avatar:
+  // - avatarPath = what we store in DB (public bucket path OR legacy full URL)
+  // - avatarUrl  = what we show (public url)
+  const [avatarPath, setAvatarPath] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
 
   // Image upload state
@@ -94,6 +111,21 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
   const [sActive, setSActive] = useState(true);
 
   const effectiveArtist = isArtist || artistMode;
+
+  // Convert stored DB value -> displayable URL (PUBLIC BUCKET)
+  const toDisplayAvatarUrl = async (stored: string | null | undefined) => {
+    const val = (stored ?? "").trim();
+    if (!val) return "";
+
+    // Legacy full URL already stored
+    if (val.startsWith("http://") || val.startsWith("https://")) {
+      return `${val}${val.includes("?") ? "&" : "?"}v=${Date.now()}`;
+    }
+
+    // Public bucket → simple public URL
+    const { data } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(val);
+    return `${data.publicUrl}?v=${Date.now()}`;
+  };
 
   const loadServices = async (artistId: string) => {
     try {
@@ -122,12 +154,18 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
       setUsername(p.username ?? "");
       setCity(p.city ?? "");
       setBio(p.bio ?? "");
-      setAvatarUrl(p.avatar_url ?? "");
 
-      // if already artist, we consider "artistMode" on implicitly
+      const stored = (p.avatar_url ?? "").trim();
+      setAvatarPath(stored);
+
+      if (stored) {
+        const display = await toDisplayAvatarUrl(stored);
+        setAvatarUrl(display);
+      } else {
+        setAvatarUrl("");
+      }
+
       setArtistMode(false);
-
-      // load services in background (we’ll only show if effectiveArtist)
       await loadServices(p.id);
     } catch (e: any) {
       Alert.alert("Error", e?.message ?? "Failed to load profile.");
@@ -146,16 +184,15 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
       username: username.trim() || null,
       city: city.trim() || null,
       bio: bio.trim() || null,
-      avatar_url: avatarUrl.trim() || null,
+      // ✅ store PATH (or legacy URL)
+      avatar_url: avatarPath.trim() || null,
     });
   };
 
-  // ✅ Save button: if toggle turned on, set role to artist
   const onSave = async () => {
     try {
       setSaving(true);
 
-      // Lightweight validation (keep it friendly)
       if (!username.trim()) {
         Alert.alert("Missing username", "Please enter a username (e.g. glamByMazzy).");
         return;
@@ -167,14 +204,16 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
 
       await saveProfileOnly();
 
-      // if user enabled artist mode and they are not artist yet → switch role
       if (!isArtist && artistMode) {
         await setMyRole("artist");
         setProfile((prev) => (prev ? { ...prev, role: "artist" } : prev));
-        setArtistMode(false); // no longer needed once role is artist
+        setArtistMode(false);
       }
 
-      Alert.alert("Saved", "Profile updated.");
+      // ✅ refresh global profile so avatar/username updates across app
+      await refreshProfile();
+
+      onBack();
     } catch (e: any) {
       Alert.alert("Error", e?.message ?? "Something went wrong.");
     } finally {
@@ -182,16 +221,32 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const pickAndUploadAvatar = async () => {
-    if (!profile?.id) return;
+  const probeImageUrl = async (url: string) => {
+    try {
+      const r = await fetch(url, { method: "GET" });
+      const ct = r.headers.get("content-type") || "";
+      const len = r.headers.get("content-length") || "";
+      const statusLine = `HTTP ${r.status} ${r.statusText}`;
+      const head = `${statusLine}\nct=${ct}\nlen=${len}\nurl=${url}`;
 
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        return `${head}\n\nbody:\n${body}`;
+      }
+
+      return head;
+    } catch (e: any) {
+      return `FETCH_FAILED: ${e?.message ?? "network error"}\nurl=${url}`;
+    }
+  };
+
+  const pickAndUploadAvatar = async () => {
     try {
       setUploadingAvatar(true);
 
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert("Permission needed", "Please allow photo access to upload an image.");
-        return;
+        throw new Error("MEDIA_PERMISSION_DENIED: User did not grant photo library access.");
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -203,28 +258,63 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
 
       if (result.canceled) return;
 
-      const uri = result.assets[0]?.uri;
-      if (!uri) return;
+      const uri = result.assets?.[0]?.uri;
+      if (!uri) throw new Error("IMAGE_URI_MISSING: Image picker returned no URI.");
 
-      const res = await fetch(uri);
-      const blob = await res.blob();
+      const { data: authData, error: authErr } = await supabase.auth.getUser();
+      if (authErr) throw new Error(`AUTH_ERROR: ${authErr.message}`);
+
+      const uid = authData.user?.id;
+      if (!uid) throw new Error("AUTH_MISSING_USER: No authenticated user found.");
+
+      // ✅ Read local file as bytes (fixes 0-byte uploads in RN)
+      const fileRes = await fetch(uri);
+      if (!fileRes.ok) throw new Error(`FILE_READ_ERROR: fetch(uri) failed (${fileRes.status}).`);
+
+      const arrayBuffer = await fileRes.arrayBuffer();
+      if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+        throw new Error("FILE_EMPTY: arrayBuffer.byteLength is 0 (image read failed).");
+      }
+
+      const bytes = new Uint8Array(arrayBuffer);
 
       const ext = extFromUri(uri);
-      const path = `${profile.id}/avatar_${Date.now()}.${ext}`;
+      const contentType = contentTypeFromExt(ext);
 
-      const { error: upErr } = await supabase.storage.from(AVATAR_BUCKET).upload(path, blob, {
-        contentType: blob.type || `image/${ext}`,
+      const path = `${uid}/avatar_${Date.now()}.${ext}`;
+
+      // ✅ Upload bytes instead of blob
+      const { error: upErr } = await supabase.storage.from(AVATAR_BUCKET).upload(path, bytes, {
+        contentType,
         upsert: true,
       });
-      if (upErr) throw upErr;
 
+      if (upErr) throw new Error(`STORAGE_UPLOAD_FAILED: ${upErr.message}`);
+
+      // ✅ Save path in profile
+      await updateMyProfile({ avatar_url: path });
+
+      // ✅ Public URL (bucket is public)
       const { data } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(path);
       const publicUrl = data?.publicUrl;
-      if (!publicUrl) throw new Error("Could not get public URL for uploaded image.");
+      if (!publicUrl) throw new Error("PUBLIC_URL_MISSING: Supabase did not return a public URL.");
 
-      setAvatarUrl(publicUrl);
-      await updateMyProfile({ avatar_url: publicUrl });
+      // ✅ Optional: quick sanity check to ensure it's not 0 bytes again
+      const test = await fetch(publicUrl, { method: "GET" });
+      const len = test.headers.get("content-length") || "";
+      if (!test.ok) throw new Error(`PUBLIC_URL_HTTP_ERROR: ${test.status}`);
+      if (len === "0") throw new Error("PUBLIC_URL_ZERO_BYTES: Uploaded object is still 0 bytes.");
+
+      const displayUrl = `${publicUrl}?v=${Date.now()}`;
+
+      setAvatarPath(path);
+      setAvatarUrl(displayUrl);
+      setProfile((prev) => (prev ? { ...prev, avatar_url: path } : prev));
+
+      // ✅ refresh global profile so avatar updates everywhere immediately
+      await refreshProfile();
     } catch (e: any) {
+      console.error("[Avatar Upload Error]", e);
       Alert.alert("Upload failed", e?.message ?? "Could not upload image.");
     } finally {
       setUploadingAvatar(false);
@@ -372,39 +462,54 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
 
             {/* Profile card */}
             <View style={styles.card}>
-                <View style={styles.profileImageRow}>
-                  <Text style={styles.label}>Profile picture</Text>
+              <View style={styles.profileImageRow}>
+                <Text style={styles.label}>Profile picture</Text>
 
-                  <Pressable
-                    onPress={pickAndUploadAvatar}
-                    disabled={uploadingAvatar}
-                    style={styles.avatarPressable}
-                    accessibilityRole="button"
-                    accessibilityLabel="Upload profile picture"
-                  >
-                    <View style={styles.avatarWrap}>
-                      {avatarUrl?.trim() ? (
-                        <>
-                          <Image source={{ uri: avatarUrl.trim() }} style={styles.avatarImg} />
+                <Pressable
+                  onPress={pickAndUploadAvatar}
+                  disabled={uploadingAvatar}
+                  style={styles.avatarPressable}
+                  accessibilityRole="button"
+                  accessibilityLabel="Upload profile picture"
+                >
+                  <View style={styles.avatarWrap}>
+                    {avatarUrl?.trim() ? (
+                      <>
+                        <ExpoImage
+                          key={avatarUrl}
+                          source={{ uri: avatarUrl.trim() }}
+                          style={styles.avatarImg}
+                          contentFit="cover"
+                          cachePolicy="none" // keep as-is (your debug setting)
+                          onError={async () => {
+                            const url = avatarUrl.trim();
+                            const info = await probeImageUrl(url);
 
-                          <View style={styles.avatarEditBadge}>
-                            <Ionicons name="camera-outline" size={14} color={OFF_WHITE} />
-                          </View>
-                        </>
-                      ) : (
-                        <View style={styles.avatarFallback}>
-                          <Ionicons
-                            name="cloud-upload-outline"
-                            size={22}
-                            color="rgba(0,0,0,0.55)"
-                          />
+                            console.log("=== AVATAR IMAGE PROBE START ===");
+                            console.log(info);
+                            console.log("=== AVATAR IMAGE PROBE END ===");
+
+                            await Clipboard.setStringAsync(info);
+
+                            Alert.alert(
+                              "Image failed to load",
+                              "I copied the full probe info to your clipboard.\nPaste it here and I’ll tell you the exact fix."
+                            );
+                          }}
+                        />
+
+                        <View style={styles.avatarEditBadge}>
+                          <Ionicons name="camera-outline" size={14} color={OFF_WHITE} />
                         </View>
-                      )}
-                    </View>
-                  </Pressable>
-                </View>
-
-
+                      </>
+                    ) : (
+                      <View style={styles.avatarFallback}>
+                        <Ionicons name="cloud-upload-outline" size={22} color="rgba(0,0,0,0.55)" />
+                      </View>
+                    )}
+                  </View>
+                </Pressable>
+              </View>
 
               <Text style={styles.label}>Username</Text>
               <TextInput
@@ -508,7 +613,13 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
             <View style={{ flexDirection: "row", gap: 10 }}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.label}>Price ($)</Text>
-                <TextInput value={sPrice} onChangeText={setSPrice} style={styles.input} placeholder="e.g. 80" keyboardType="numeric" />
+                <TextInput
+                  value={sPrice}
+                  onChangeText={setSPrice}
+                  style={styles.input}
+                  placeholder="e.g. 80"
+                  keyboardType="numeric"
+                />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.label}>Duration (min)</Text>
@@ -593,17 +704,6 @@ const styles = StyleSheet.create({
     borderColor: OFF_WHITE,
   },
 
-avatarUploadHint: {
-  marginTop: 4,
-  fontSize: 11,
-  fontWeight: "800",
-  color: "rgba(0,0,0,0.55)",
-  textAlign: "center",
-},
-
-
-
-
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
 
   screen: { padding: 16, gap: 12, paddingBottom: 24 },
@@ -639,7 +739,6 @@ avatarUploadHint: {
     justifyContent: "space-between",
   },
 
-  avatarRow: { flexDirection: "row", gap: 12, alignItems: "center" },
   avatarWrap: {
     width: 64,
     height: 64,
@@ -651,9 +750,6 @@ avatarUploadHint: {
   },
   avatarImg: { width: "100%", height: "100%" },
   avatarFallback: { flex: 1, alignItems: "center", justifyContent: "center" },
-  avatarFallbackText: { fontSize: 22, fontWeight: "900", color: "rgba(0,0,0,0.70)" },
-
-  avatarActionsRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
 
   servicesHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   smallBtn: {

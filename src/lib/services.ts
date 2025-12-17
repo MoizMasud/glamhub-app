@@ -17,6 +17,7 @@ export type ArtistPublic = {
   bio: string | null;
   city: string | null;
   role: "artist" | "client";
+  avatar_url: string | null; // ✅ add this
 };
 
 export type MarketplaceService = ServiceRow & {
@@ -52,7 +53,7 @@ export async function listActiveServicesWithArtist() {
     .select(
       `
       id, artist_id, title, description, price_cents, duration_minutes, is_active, created_at,
-      artist:profiles!services_artist_id_profiles_fkey ( id, username, bio, city, role )
+      artist:profiles!services_artist_id_profiles_fkey ( id, username, bio, city, role, avatar_url )
     `
     )
     .eq("is_active", true)
@@ -74,7 +75,7 @@ export async function getServiceDetails(serviceId: string) {
     .select(
       `
       id, artist_id, title, description, price_cents, duration_minutes, is_active, created_at,
-      artist:profiles ( id, username, bio, city, role )
+      artist:profiles ( id, username, bio, city, role, avatar_url )
     `
     )
     .eq("id", serviceId)
@@ -100,7 +101,7 @@ export async function getServiceDetails(serviceId: string) {
   let artist: any = null;
   const { data: p, error: pErr } = await supabase
     .from("profiles")
-    .select("id, username, bio, city, role")
+    .select("id, username, bio, city, role, avatar_url")
     .eq("id", (s as any).artist_id)
     .single();
 
@@ -115,19 +116,23 @@ export async function createService(input: {
   price_cents: number;
   duration_minutes: number;
 }) {
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
   if (!user) throw new Error("No user session");
 
   const { data, error } = await supabase
     .from("services")
-    .insert([{
-      artist_id: user.id,
-      title: input.title,
-      description: input.description ?? null,
-      price_cents: input.price_cents,
-      duration_minutes: input.duration_minutes,
-      is_active: true,
-    }])
+    .insert([
+      {
+        artist_id: user.id,
+        title: input.title,
+        description: input.description ?? null,
+        price_cents: input.price_cents,
+        duration_minutes: input.duration_minutes,
+        is_active: true,
+      },
+    ])
     .select("id,artist_id,title,description,price_cents,duration_minutes,is_active,created_at")
     .single();
 

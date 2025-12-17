@@ -404,7 +404,7 @@ const styles = StyleSheet.create({
   empty: {
     marginTop: 12,
     borderRadius: 16,
-    backgroundColor: CARD_BG,
+    backgroundColor: OFF_WHITE,
     padding: 14,
   },
   emptyTitle: { fontWeight: "900", color: BLACK },

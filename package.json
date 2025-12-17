@@ -9,16 +9,21 @@
     "web": "expo start --web",
     "start:dev": "cross-env EXPO_PUBLIC_ENV=dev expo start",
     "start:staging": "cross-env EXPO_PUBLIC_ENV=staging expo start",
-    "start:prod": "cross-env EXPO_PUBLIC_ENV=prod expo start"
+    "start:prod": "cross-env EXPO_PUBLIC_ENV=prod expo start",
+    "start:dev:share": "cross-env EXPO_PUBLIC_ENV=dev expo start --tunnel"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
     "@react-native-community/datetimepicker": "8.4.4",
     "@react-native-community/slider": "5.0.1",
     "@supabase/supabase-js": "^2.87.3",
+    "base64-arraybuffer": "^1.0.2",
     "expo": "~54.0.29",
+    "expo-clipboard": "~8.0.8",
     "expo-constants": "~18.0.12",
+    "expo-file-system": "~19.0.21",
     "expo-google-places-autocomplete": "^1.2.0",
+    "expo-image": "~3.0.11",
     "expo-image-picker": "~17.0.10",
     "expo-location": "~19.0.8",
     "expo-sqlite": "~16.0.10",

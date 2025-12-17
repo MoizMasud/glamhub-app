@@ -11,19 +11,15 @@ import {
   Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { Image as ExpoImage } from "expo-image";
 import { useAuth } from "../context/AuthContext";
-import { getMyProfile, MyProfile } from "../lib/profile";
+import { avatarPublicUrl } from "../lib/profile";
 
 const PINK = "#f6d6d6";
 const BLACK = "#000000";
 const OFF_WHITE = "#FFFFfF";
 const MUTED = "rgba(0,0,0,0.6)";
 const BORDER = "rgba(0,0,0,0.08)";
-
-function isExpectedNoSessionError(e: any) {
-  const msg = String(e?.message ?? "").toLowerCase();
-  return msg.includes("no user session") || msg.includes("not signed in");
-}
 
 function MenuItem({
   icon,
@@ -60,36 +56,56 @@ export default function AccountScreen({
   onOpenBookings: () => void;
   onSignedOut: () => void;
 }) {
-  const { user, signOut } = useAuth();
+  const { user, signOut, profile, profileLoading, refreshProfile } = useAuth();
 
-  const [profile, setProfile] = useState<MyProfile | null>(null);
-  const [loading, setLoading] = useState(true);
+  // ✅ Only show page when avatar is prefetched (prevents "pop in")
+  const [pageReady, setPageReady] = useState(false);
+  const [avatarUrl, setAvatarUrl] = useState<string>("");
 
   const role = useMemo(() => profile?.role ?? "client", [profile?.role]);
   const isArtist = role === "artist";
 
-  const load = async () => {
-    if (!user) {
-      setProfile(null);
-      setLoading(false);
-      return;
-    }
-
-    try {
-      setLoading(true);
-      const p = await getMyProfile();
-      setProfile(p);
-    } catch (e: any) {
-      if (!isExpectedNoSessionError(e)) Alert.alert("Error", e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+    let mounted = true;
+
+    (async () => {
+      // If not logged in, page can render immediately
+      if (!user) {
+        if (mounted) {
+          setAvatarUrl("");
+          setPageReady(true);
+        }
+        return;
+      }
+
+      try {
+        setPageReady(false);
+
+        // always refresh so avatar is up-to-date when returning
+        const p = await refreshProfile();
+
+        const raw = avatarPublicUrl((p as any)?.avatar_url ?? profile?.avatar_url ?? null);
+        const url = raw ? `${raw}?v=${Date.now()}` : "";
+
+        // Prefetch avatar so it doesn't appear half a second later
+        if (url) {
+          await ExpoImage.prefetch(url);
+        }
+
+        if (mounted) setAvatarUrl(url);
+      } catch {
+        // no alert; keep clean. fall back to initial.
+        if (mounted) setAvatarUrl("");
+      } finally {
+        if (mounted) setPageReady(true);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+    // ✅ refresh when user changes OR avatar path changes
+  }, [user?.id, profile?.avatar_url]);
 
   const onSignOutPress = async () => {
     try {
@@ -104,6 +120,8 @@ export default function AccountScreen({
   const email = user?.email ?? "";
   const initial = (username?.[0] || "A").toUpperCase();
 
+  const showLoading = !pageReady || profileLoading;
+
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
@@ -111,17 +129,30 @@ export default function AccountScreen({
           <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
         </Pressable>
 
-
-        {loading ? (
+        {showLoading ? (
           <View style={styles.center}>
             <ActivityIndicator />
           </View>
         ) : (
           <>
-            {/* Header card (same vibe as your new design) */}
+            {/* Header card */}
             <View style={styles.headerCard}>
               <View style={styles.avatar}>
-                <Text style={styles.avatarText}>{initial}</Text>
+                {avatarUrl ? (
+                  <ExpoImage
+                    source={{ uri: avatarUrl }}
+                    style={styles.avatarImg}
+                    contentFit="cover"
+                    cachePolicy="disk"
+                    transition={0}
+                    onError={() => {
+                      // fallback to initial silently
+                      setAvatarUrl("");
+                    }}
+                  />
+                ) : (
+                  <Text style={styles.avatarText}>{initial}</Text>
+                )}
               </View>
 
               <View style={{ flex: 1 }}>
@@ -135,14 +166,15 @@ export default function AccountScreen({
             {/* Menu */}
             <View style={styles.menuCard}>
               <MenuItem icon="calendar-outline" label="Manage Bookings" onPress={onOpenBookings} />
-              
               <MenuItem icon="create-outline" label="Edit Profile" onPress={onOpenOnboarding} />
-
               <MenuItem icon="settings-outline" label="Settings" onPress={onOpenSettings} />
 
               <View style={styles.divider} />
 
-              <Pressable onPress={onSignOutPress} style={({ pressed }) => [styles.signOutBtn, pressed && { opacity: 0.9 }]}>
+              <Pressable
+                onPress={onSignOutPress}
+                style={({ pressed }) => [styles.signOutBtn, pressed && { opacity: 0.9 }]}
+              >
                 <Text style={styles.signOutText}>Sign out</Text>
               </Pressable>
             </View>
@@ -160,7 +192,6 @@ const styles = StyleSheet.create({
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
   },
   container: { flex: 1, padding: 20 },
-  backText: { color: BLACK, fontWeight: "700" },
 
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
 
@@ -181,12 +212,14 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.06)",
     alignItems: "center",
     justifyContent: "center",
+    overflow: "hidden",
   },
+  avatarImg: { width: "100%", height: "100%" },
   avatarText: { fontWeight: "900", fontSize: 22, color: BLACK },
 
   headerTitle: { fontWeight: "900", color: BLACK, fontSize: 18 },
-  headerName: { fontWeight: "800", color: BLACK, marginTop: 2 },
   headerSub: { color: MUTED, marginTop: 2, fontWeight: "600" },
+
   backBtn: {
     width: 40,
     height: 40,
@@ -196,6 +229,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     backgroundColor: "rgba(255,255,255,0.35)",
   },
+
   menuCard: {
     marginTop: 16,
     backgroundColor: OFF_WHITE,
@@ -226,11 +260,4 @@ const styles = StyleSheet.create({
 
   signOutBtn: { paddingHorizontal: 14, paddingVertical: 14, alignItems: "center" },
   signOutText: { fontWeight: "900", color: BLACK },
-
-  footerHint: {
-    marginTop: 12,
-    color: MUTED,
-    fontWeight: "600",
-    textAlign: "center",
-  },
 });

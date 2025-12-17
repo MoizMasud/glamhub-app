@@ -10,17 +10,18 @@ import {
   ActivityIndicator,
   ScrollView,
   Modal,
-  Image,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { Image as ExpoImage } from "expo-image";
 import { supabase } from "../lib/supabase";
-import { getArtistPublicProfile } from "../lib/profile";
+import { avatarPublicUrl } from "../lib/profile";
 import {
   listArtistActiveServices,
   getServiceDetails,
   MarketplaceService,
   ServiceRow,
 } from "../lib/services";
+import { useAuth } from "../context/AuthContext";
 
 // ✅ GlamHub palette
 const PINK = "#f6d6d6";
@@ -52,17 +53,16 @@ async function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promi
 }
 
 type ArtistProfileApi = {
+  id: string;
   username?: string | null;
-  display_name?: string | null;
-  name?: string | null;
   pronouns?: string | null;
   rating?: number | null;
   bio?: string | null;
   tags?: string[] | null;
   specialties?: string[] | null;
   avatar_url?: string | null;
-  photo_url?: string | null;
-  image_url?: string | null;
+  city?: string | null;
+  role?: string | null;
 };
 
 type ArtistPublic = {
@@ -72,7 +72,7 @@ type ArtistPublic = {
   rating?: number | null;
   bio?: string | null;
   tags?: string[] | null;
-  avatarUrl?: string | null;
+  avatarUrl?: string | null; // FINAL display url
 };
 
 export default function ArtistProfileScreen({
@@ -86,18 +86,18 @@ export default function ArtistProfileScreen({
   onOpenBooking: (args: { artistId: string; serviceIds: string[] }) => void;
   onRequestSignIn: () => void;
 }) {
+  const { profile: myProfile } = useAuth();
+
   const [loading, setLoading] = useState(true);
   const [artist, setArtist] = useState<ArtistPublic | null>(null);
   const [services, setServices] = useState<ServiceRow[]>([]);
   const [errorText, setErrorText] = useState<string | null>(null);
 
-  // ✅ detect if this profile belongs to the logged-in user
   const [isSelf, setIsSelf] = useState(false);
+  const [avatarBust, setAvatarBust] = useState<number>(Date.now());
 
-  // ✅ service selection
   const [selected, setSelected] = useState<Record<string, boolean>>({});
 
-  // ✅ details popup
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
@@ -151,28 +151,51 @@ export default function ArtistProfileScreen({
       setLoading(true);
       setErrorText(null);
 
-      // ✅ auth check first (so isSelf is correct before we render anything)
       const { data: authData } = await supabase.auth.getUser();
       const meId = authData?.user?.id ?? null;
       const self = !!meId && meId === artistId;
       setIsSelf(self);
 
-      const [aRaw, s] = await Promise.all([
-        withTimeout(getArtistPublicProfile(artistId), 12000, "Request timed out. Try again."),
-        withTimeout(listArtistActiveServices(artistId), 12000, "Request timed out. Try again."),
-      ]);
+      // ✅ use one bust value for this load (don’t re-roll during render)
+      const bust = Date.now();
+      setAvatarBust(bust);
 
-      const a = (aRaw as ArtistProfileApi | null) ?? null;
-      const avatarUrl = a?.avatar_url ?? a?.photo_url ?? a?.image_url ?? null;
+        const profilePromise = (async () => {
+          const res = await supabase
+            .from("profiles")
+            .select("id, username, bio, city, role, avatar_url")
+            .eq("id", artistId)
+            .single();
+          return res; // { data, error }
+        })();
+
+        const [pRes, s] = await Promise.all([
+          withTimeout(profilePromise, 12000, "Request timed out. Try again."),
+          withTimeout(listArtistActiveServices(artistId), 12000, "Request timed out. Try again."),
+        ]);
+
+        if (pRes.error) throw pRes.error;
+
+        const a = (pRes.data as ArtistProfileApi) ?? null;
+
+
+      const rawAvatar = self ? myProfile?.avatar_url ?? null : a?.avatar_url ?? null;
+      const publicAvatar = rawAvatar ? avatarPublicUrl(rawAvatar) : "";
+      const displayAvatar = publicAvatar ? `${publicAvatar}?v=${bust}` : "";
+
+      // ✅ Prefetch avatar BEFORE rendering screen (prevents pop-in)
+      if (displayAvatar) {
+        await ExpoImage.prefetch(displayAvatar);
+      }
 
       setArtist({
         id: artistId,
-        username: a?.username ?? a?.display_name ?? a?.name ?? "Artist",
+        username: a?.username ?? "Artist",
         pronouns: a?.pronouns ?? null,
         rating: a?.rating ?? null,
         bio: a?.bio ?? null,
         tags: a?.tags ?? a?.specialties ?? null,
-        avatarUrl,
+        avatarUrl: publicAvatar || null,
       });
 
       setServices(s ?? []);
@@ -195,9 +218,16 @@ export default function ArtistProfileScreen({
   };
 
   useEffect(() => {
-    load();
+    let mounted = true;
+    (async () => {
+      if (!mounted) return;
+      await load();
+    })();
+    return () => {
+      mounted = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [artistId]);
+  }, [artistId, myProfile?.avatar_url]);
 
   const onPressBook = async () => {
     if (!canBook) return;
@@ -215,7 +245,6 @@ export default function ArtistProfileScreen({
   const pronouns = artist?.pronouns ? `(${artist.pronouns})` : "";
   const rating = artist?.rating != null ? Number(artist.rating).toFixed(1) : null;
 
-  // ✅ KEY FIX: render NOTHING of the page until ready (prevents Book button flash)
   if (loading) {
     return (
       <SafeAreaView style={styles.safe}>
@@ -225,6 +254,8 @@ export default function ArtistProfileScreen({
       </SafeAreaView>
     );
   }
+
+  const avatarDisplayUrl = artist?.avatarUrl ? `${artist.avatarUrl}?v=${avatarBust}` : "";
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -243,7 +274,6 @@ export default function ArtistProfileScreen({
           </View>
         ) : (
           <>
-            {/* Top bar */}
             <View style={styles.topBar}>
               <Pressable onPress={onBack} style={styles.iconBtn} accessibilityRole="button">
                 <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
@@ -269,11 +299,17 @@ export default function ArtistProfileScreen({
               contentContainerStyle={{ paddingBottom: 18 }}
               showsVerticalScrollIndicator={false}
             >
-              {/* Header block */}
               <View style={styles.headerBlock}>
                 <View style={styles.photoWrap}>
-                  {artist.avatarUrl ? (
-                    <Image source={{ uri: artist.avatarUrl }} style={styles.photo} />
+                  {avatarDisplayUrl ? (
+                    <ExpoImage
+                      key={avatarDisplayUrl}
+                      source={{ uri: avatarDisplayUrl }}
+                      style={styles.photo}
+                      contentFit="cover"
+                      cachePolicy="disk"
+                      transition={0}
+                    />
                   ) : (
                     <View style={[styles.photo, styles.photoFallback]}>
                       <Text style={styles.photoFallbackText}>
@@ -306,7 +342,6 @@ export default function ArtistProfileScreen({
                 )}
               </View>
 
-              {/* About */}
               <Text style={styles.sectionTitle}>About Me</Text>
               <Text style={styles.about}>
                 {artist.bio?.trim()
@@ -314,7 +349,6 @@ export default function ArtistProfileScreen({
                   : "Professional stylist focused on soft glam, textured hair, and personalized beauty services. I prioritize comfort, inclusivity, and results that feel authentically you."}
               </Text>
 
-              {/* Services */}
               <Text style={[styles.sectionTitle, { marginTop: 18 }]}>Services</Text>
 
               {services.length === 0 ? (
@@ -380,17 +414,12 @@ export default function ArtistProfileScreen({
         )}
       </View>
 
-      {/* Service Details Popup */}
       <Modal visible={detailsOpen} transparent animationType="fade" onRequestClose={closeDetails}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Service Details</Text>
-              <Pressable
-                onPress={closeDetails}
-                style={styles.modalCloseBtn}
-                accessibilityRole="button"
-              >
+              <Pressable onPress={closeDetails} style={styles.modalCloseBtn} accessibilityRole="button">
                 <Ionicons name="close" size={18} color={BLACK} />
               </Pressable>
             </View>
@@ -424,9 +453,7 @@ export default function ArtistProfileScreen({
 
                 <View style={styles.detailsRow}>
                   <View style={styles.detailsChip}>
-                    <Text style={styles.detailsChipText}>
-                      {formatPriceShort(details.price_cents)}
-                    </Text>
+                    <Text style={styles.detailsChipText}>{formatPriceShort(details.price_cents)}</Text>
                   </View>
                   <View style={styles.detailsChip}>
                     <Text style={styles.detailsChipText}>{details.duration_minutes} min</Text>
@@ -669,4 +696,3 @@ const styles = StyleSheet.create({
 
   detailsDesc: { marginTop: 10, color: MUTED, fontWeight: "700", lineHeight: 18 },
 });
-
