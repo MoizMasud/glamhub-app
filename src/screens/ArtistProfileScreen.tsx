@@ -10,13 +10,16 @@ import {
   SafeAreaView,
   Platform,
   StatusBar,
+  Image,
 } from "react-native";
 import { getArtistPublicProfile } from "../lib/profile";
 import { listArtistActiveServices, ServiceRow } from "../lib/services";
+import { Ionicons } from "@expo/vector-icons";
 
-const PINK = "#f9dfdd";
+const PINK = "#f6d6d6";
 const BLACK = "#000000";
 const OFF_WHITE = "#FFFFEF";
+const MUTED = "rgba(0,0,0,0.6)";
 
 function formatPrice(cents: number) {
   return `$${(cents / 100).toFixed(2)}`;
@@ -53,82 +56,96 @@ export default function ArtistProfileScreen({
 
   return (
     <SafeAreaView style={styles.safe}>
-      <View style={styles.screen}>
-        <View style={styles.topRow}>
-          <Pressable onPress={onBack} style={styles.pillBtn}>
-            <Text style={styles.pillText}>Back</Text>
-          </Pressable>
+      <ScrollView contentContainerStyle={styles.container}>
+        {/* Back */}
+        <Pressable onPress={onBack} style={styles.backBtn} accessibilityRole="button">
+          <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
+        </Pressable>
 
-          <Pressable onPress={load} style={styles.pillBtn}>
-            <Text style={styles.pillText}>Refresh</Text>
-          </Pressable>
-        </View>
 
         {loading ? (
           <View style={styles.center}>
             <ActivityIndicator />
-            <Text style={{ marginTop: 10, color: BLACK }}>Loading…</Text>
           </View>
         ) : !artist ? (
           <View style={styles.center}>
-            <Text style={{ fontWeight: "900", color: BLACK }}>Artist not found</Text>
+            <Text style={{ fontWeight: "800" }}>Artist not found</Text>
           </View>
         ) : (
-          <ScrollView contentContainerStyle={{ gap: 12 }}>
-            <View style={styles.hero}>
-              <Text style={styles.name}>{artist.username || "Artist"}</Text>
-              <Text style={styles.meta}>{artist.city || "City not set"}</Text>
-              <Text style={styles.bio}>
-                {artist.bio || "No bio yet."}
-              </Text>
+          <>
+            {/* Avatar */}
+            <View style={styles.avatarWrap}>
+              {artist.avatar_url ? (
+                <Image
+                  source={{ uri: artist.avatar_url }}
+                  style={styles.avatar}
+                />
+              ) : (
+                <View style={styles.avatarFallback}>
+                  <Text style={styles.avatarInitial}>
+                    {(artist.username || "A")[0]}
+                  </Text>
+                </View>
+              )}
             </View>
 
+            {/* Name + meta */}
+            <Text style={styles.name}>
+              {artist.display_name || artist.username || "Artist"}
+            </Text>
+
+            <Text style={styles.meta}>
+              (she/her) • {artist.rating ?? "4.5"} ★
+            </Text>
+
+            {/* Tags */}
+            <View style={styles.tags}>
+              {!!artist.specialties?.length ? (
+                artist.specialties.map((t: string) => (
+                  <View key={t} style={styles.tag}>
+                    <Text style={styles.tagText}>{t}</Text>
+                  </View>
+                ))
+              ) : (
+                <>
+                  <View style={styles.tag}><Text style={styles.tagText}>Curly-Hair Specialist</Text></View>
+                  <View style={styles.tag}><Text style={styles.tagText}>Student Discount</Text></View>
+                  <View style={styles.tag}><Text style={styles.tagText}>Queer Inclusive</Text></View>
+                </>
+              )}
+            </View>
+
+            {/* About */}
+            <Text style={styles.sectionTitle}>About Me</Text>
+            <Text style={styles.about}>
+              {artist.bio ||
+                "Professional stylist focused on soft glam, textured hair, and personalized beauty services. I prioritize comfort, inclusivity, and results that feel authentically you."}
+            </Text>
+
+            {/* Services */}
             <Text style={styles.sectionTitle}>Services</Text>
 
             {services.length === 0 ? (
-              <View style={styles.empty}>
-                <Text style={{ fontWeight: "900", color: BLACK }}>
-                  No services listed yet
-                </Text>
-              </View>
+              <Text style={styles.empty}>No services listed yet</Text>
             ) : (
-              services.map((s) => (
-                <Pressable
-                  key={s.id}
-                  style={styles.card}
-                  onPress={() => onOpenService(s.id)}
-                >
-                  <View style={styles.cardTop}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.cardTitle}>{s.title}</Text>
-                      {!!s.description && (
-                        <Text style={styles.desc}>{s.description}</Text>
-                      )}
-                    </View>
-
-                    <View style={styles.pricePill}>
-                      <Text style={styles.priceText}>
-                        {formatPrice(s.price_cents)}
-                      </Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.cardBottom}>
-                    <Text style={styles.duration}>{s.duration_minutes} min</Text>
-
-                    <Pressable
-                      onPress={() => onOpenService(s.id)}
-                      style={styles.bookBtn}
-                    >
-                      <Text style={styles.bookText}>Book</Text>
-                    </Pressable>
-                  </View>
-                </Pressable>
-              ))
+              <View style={styles.services}>
+                {services.map((s) => (
+                  <Pressable
+                    key={s.id}
+                    onPress={() => onOpenService(s.id)}
+                    style={styles.serviceRow}
+                  >
+                    <Text style={styles.serviceTitle}>{s.title}</Text>
+                    <Text style={styles.price}>
+                      {formatPrice(s.price_cents)}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
             )}
-          </ScrollView>
+          </>
         )}
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -136,76 +153,121 @@ export default function ArtistProfileScreen({
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: OFF_WHITE,
+    backgroundColor: PINK,
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
   },
-  screen: { flex: 1, padding: 16 },
-  topRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 12 },
-  pillBtn: {
-    borderWidth: 1,
-    borderColor: BLACK,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+  container: {
+    padding: 20,
+    paddingBottom: 40,
   },
-  pillText: { fontWeight: "900", color: BLACK },
-  center: { flex: 1, alignItems: "center", justifyContent: "center" },
-
-  hero: {
-    borderWidth: 1,
-    borderColor: BLACK,
-    borderRadius: 16,
-    padding: 14,
-    backgroundColor: PINK,
-    gap: 6,
+  backBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+    backgroundColor: "rgba(255,255,255,0.35)",
   },
-  name: { fontSize: 28, fontWeight: "900", color: BLACK },
-  meta: { fontWeight: "800", color: BLACK, opacity: 0.85 },
-  bio: { color: BLACK },
-
-  sectionTitle: { fontSize: 16, fontWeight: "900", color: BLACK },
-  empty: {
-    padding: 16,
-    borderWidth: 1,
-    borderColor: BLACK,
-    borderRadius: 16,
+  backText: {
+    fontWeight: "700",
+    color: BLACK,
+  },
+  center: {
+    marginTop: 80,
     alignItems: "center",
   },
 
-  card: {
-    borderWidth: 1,
-    borderColor: BLACK,
-    borderRadius: 16,
-    padding: 12,
-    gap: 10,
+  avatarWrap: {
+    alignItems: "center",
+    marginTop: 8,
+  },
+  avatar: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+  },
+  avatarFallback: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
     backgroundColor: OFF_WHITE,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  cardTop: { flexDirection: "row", gap: 10 },
-  cardTitle: { fontSize: 18, fontWeight: "900", color: BLACK },
-  desc: { marginTop: 6, color: BLACK, opacity: 0.85 },
-  pricePill: {
-    backgroundColor: PINK,
-    borderWidth: 1,
-    borderColor: BLACK,
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  priceText: { fontWeight: "900", color: BLACK },
-  cardBottom: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  duration: {
-    backgroundColor: PINK,
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    fontWeight: "900",
+  avatarInitial: {
+    fontSize: 36,
+    fontWeight: "800",
     color: BLACK,
   },
-  bookBtn: {
-    backgroundColor: BLACK,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
+
+  name: {
+    textAlign: "center",
+    fontSize: 22,
+    fontWeight: "800",
+    marginTop: 12,
+    color: BLACK,
   },
-  bookText: { color: OFF_WHITE, fontWeight: "900" },
+  meta: {
+    textAlign: "center",
+    marginTop: 4,
+    color: MUTED,
+    fontWeight: "600",
+  },
+
+  tags: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 8,
+    marginTop: 14,
+  },
+  tag: {
+    backgroundColor: OFF_WHITE,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  tagText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: BLACK,
+  },
+
+  sectionTitle: {
+    marginTop: 24,
+    marginBottom: 8,
+    fontSize: 16,
+    fontWeight: "800",
+    color: BLACK,
+  },
+  about: {
+    color: BLACK,
+    lineHeight: 20,
+  },
+
+  services: {
+    marginTop: 4,
+    gap: 12,
+  },
+  serviceRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    backgroundColor: OFF_WHITE,
+    padding: 14,
+    borderRadius: 14,
+  },
+  serviceTitle: {
+    fontWeight: "700",
+    color: BLACK,
+  },
+  price: {
+    fontWeight: "700",
+    color: BLACK,
+  },
+
+  empty: {
+    color: MUTED,
+    marginTop: 8,
+  },
 });

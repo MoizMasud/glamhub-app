@@ -20,12 +20,16 @@ import { listActiveServicesWithArtist, MarketplaceService } from "../lib/service
 import type { MarketplaceFilters } from "./SearchScreen";
 
 const BLACK = "#000000";
+const WHITE = "#FFFFFF";
 const OFF_WHITE = "#FFFFEF";
-const MUTED = "rgba(0,0,0,0.55)";
-const BORDER = "rgba(0,0,0,0.10)";
-const AVATAR_BG = "rgba(0,0,0,0.06)";
 
-const GH_WHITE = require("../../assets/gh-white.png");
+const PINK_CARD = "#F6D6D6"; // main pink card
+const PINK_CARD_SOFT = "#F9DFDD"; // slightly softer for inner balance
+const MUTED = "rgba(0,0,0,0.55)";
+const MUTED_2 = "rgba(0,0,0,0.40)";
+const CHIP_BORDER = "rgba(0,0,0,0.14)";
+const SHADOW = "rgba(0,0,0,0.10)";
+const AVATAR_FALLBACK = "rgba(255,255,255,0.65)";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 const CHIP_MAX_W = Math.min(240, Math.floor(SCREEN_W * 0.62)); // keeps pills from overflowing
@@ -75,15 +79,12 @@ function getInitials(name?: string | null) {
   return out || "GH";
 }
 
-// ✅ NEW: make location pill show only "City" (not full address string)
+// make location pill show only "City" (not full address string)
 function compactCityLabel(raw?: string) {
   const s = String(raw ?? "").trim();
   if (!s) return "";
-  // remove our "Near " prefix if present
   const noNear = s.replace(/^near\s+/i, "").trim();
-  // if it has commas, take the first chunk ("Toronto" from "Toronto, Ontario, Canada")
   const first = noNear.split(",")[0]?.trim() ?? "";
-  // if it still looks long, fall back to first 2 words max
   if (first.length <= 20) return first || noNear;
   const words = noNear.split(/\s+/).filter(Boolean);
   return words.slice(0, 2).join(" ");
@@ -116,8 +117,11 @@ export default function MarketplaceScreen({
   const [services, setServices] = useState<MarketplaceService[]>([]);
   const [clears, setClears] = useState<ClearFlags>({});
 
-  // auth-aware header icon (login icon when logged out, burger when logged in)
+  // auth-aware header icon (not used in this screen yet, but keep state stable)
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+
+  // UI-only segmented toggle (no map logic added)
+  const [viewMode, setViewMode] = useState<"list" | "map">("list");
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -143,7 +147,6 @@ export default function MarketplaceScreen({
 
     if (clears.service) delete f.service;
 
-    // ✅ clear distance/location properly
     if (clears.location) {
       delete f.locationText;
       delete f.locationCoords;
@@ -234,17 +237,12 @@ export default function MarketplaceScreen({
       });
     }
 
-    // ✅ Location chip: only show city + distance (if present)
     const hasLoc = !!f?.locationText;
     const hasKm = typeof f?.maxDistanceKm === "number";
 
     if (hasLoc || hasKm) {
       const kmText = hasKm ? `${Math.round(Number(f.maxDistanceKm))} km` : "";
       const cityText = hasLoc ? compactCityLabel(f.locationText) : "";
-
-      // if both exist -> "15 km • Toronto"
-      // if only city -> "Toronto"
-      // if only km -> "15 km"
       const label = [kmText, cityText].filter(Boolean).join(" • ");
 
       out.push({
@@ -303,7 +301,7 @@ export default function MarketplaceScreen({
                     hitSlop={10}
                     style={styles.chipCloseBtn}
                   >
-                    <Ionicons name="close" size={14} color={isPrimary ? OFF_WHITE : BLACK} />
+                    <Ionicons name="close" size={14} color={isPrimary ? WHITE : BLACK} />
                   </Pressable>
                 </Pressable>
               );
@@ -322,14 +320,30 @@ export default function MarketplaceScreen({
               const displayName = s.artist?.username ?? "Artist";
               const initials = getInitials(displayName);
 
+              // If you have an avatar field in your DB, this will use it.
+              // Otherwise it falls back to initials (same logic/behavior).
+              const avatarUrl =
+                (s as any)?.artist?.avatar_url ||
+                (s as any)?.artist?.photo_url ||
+                (s as any)?.artist?.image_url ||
+                null;
+
               return (
                 <Pressable key={s.id} style={styles.card} onPress={() => onOpenService(s.id)}>
-                  <View style={styles.avatar}>
-                    <Text style={styles.avatarText}>{initials}</Text>
+                  {/* Left image block (spans card height like screenshot) */}
+                  <View style={styles.imageWrap}>
+                    {avatarUrl ? (
+                      <Image source={{ uri: avatarUrl }} style={styles.image} />
+                    ) : (
+                      <View style={styles.imageFallback}>
+                        <Text style={styles.imageFallbackText}>{initials}</Text>
+                      </View>
+                    )}
                   </View>
 
+                  {/* Content */}
                   <View style={styles.cardBody}>
-                    <Pressable onPress={() => onOpenArtist(s.artist_id)}>
+                    <Pressable onPress={() => onOpenArtist(s.artist_id)} style={{ alignSelf: "flex-start" }}>
                       <Text style={styles.name} numberOfLines={1}>
                         {displayName}
                       </Text>
@@ -337,15 +351,16 @@ export default function MarketplaceScreen({
 
                     <Text style={styles.meta} numberOfLines={2}>
                       {compactMeta(s)}
-                      {s.artist?.city ? ` • ${s.artist.city}` : ""}
                     </Text>
 
-                    <Text style={styles.price}>{formatPrice(s.price_cents)}</Text>
-                  </View>
+                    <View style={styles.bottomRow}>
+                      <Text style={styles.price}>{formatPrice(s.price_cents)}</Text>
 
-                  <View style={styles.rating}>
-                    <Ionicons name="star" size={14} color={BLACK} />
-                    <Text style={styles.ratingText}>{rating.toFixed(1)}</Text>
+                      <View style={styles.rating}>
+                        <Ionicons name="star" size={14} color={BLACK} />
+                        <Text style={styles.ratingText}>{rating.toFixed(1)}</Text>
+                      </View>
+                    </View>
                   </View>
                 </Pressable>
               );
@@ -364,38 +379,18 @@ export default function MarketplaceScreen({
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: OFF_WHITE,
+    backgroundColor: WHITE, // ✅ white background like your target screenshots
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
   },
-  screen: { flex: 1, paddingHorizontal: 14, paddingTop: 10 },
 
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 6,
-  },
-  headerBtn: {
-    width: 40,
-    height: 40,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 999,
-  },
-
-  logoWrap: {
-    height: 56,
-    width: 210,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  logo: {
-    height: 44,
-    width: 210,
+  screen: {
+    flex: 1,
+    paddingHorizontal: 14,
+    paddingTop: 10,
   },
 
   title: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: "900",
     color: BLACK,
     marginTop: 6,
@@ -406,16 +401,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 10,
-    paddingBottom: 12,
+    paddingBottom: 10,
     alignItems: "center",
   },
 
-  // ✅ smaller pills
   chip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    height: 36,
+    height: 34,
     paddingLeft: 12,
     paddingRight: 8,
     borderRadius: 999,
@@ -429,7 +423,7 @@ const styles = StyleSheet.create({
   chipOutline: {
     backgroundColor: "transparent",
     borderWidth: 1,
-    borderColor: BLACK,
+    borderColor: CHIP_BORDER,
   },
   chipText: {
     fontWeight: "900",
@@ -438,9 +432,8 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   chipTextPrimary: {
-    color: OFF_WHITE,
+    color: WHITE,
   },
-  // ✅ smaller close target (still easy to tap)
   chipCloseBtn: {
     width: 26,
     height: 26,
@@ -449,58 +442,122 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
-  list: { gap: 10, paddingTop: 2 },
-  center: { flex: 1, alignItems: "center", justifyContent: "center" },
-
-  card: {
+  viewToggleRow: {
     flexDirection: "row",
+    justifyContent: "center",
     alignItems: "center",
-    gap: 10,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 18,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: BORDER,
+    gap: 16,
+    paddingBottom: 10,
+  },
+  viewToggleBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: "transparent",
+  },
+  viewToggleBtnActive: {
+    backgroundColor: "rgba(0,0,0,0.05)",
+  },
+  viewToggleText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: MUTED_2,
+  },
+  viewToggleTextActive: {
+    color: BLACK,
   },
 
-  avatar: {
-    width: 62,
-    height: 62,
-    borderRadius: 16,
-    backgroundColor: AVATAR_BG,
+  list: { gap: 12, paddingTop: 6, paddingBottom: 10 },
+  center: { flex: 1, alignItems: "center", justifyContent: "center" },
+
+  // ✅ pink cards + left image spanning height
+  card: {
+    flexDirection: "row",
+    alignItems: "stretch",
+    backgroundColor: PINK_CARD,
+    borderRadius: 22,
+    padding: 12,
+    shadowColor: SHADOW,
+    shadowOpacity: 1,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
+  },
+
+  imageWrap: {
+    width: 86,
+    borderRadius: 18,
+    overflow: "hidden",
+    backgroundColor: AVATAR_FALLBACK,
+  },
+  image: {
+    width: "100%",
+    height: "100%",
+    resizeMode: "cover",
+  },
+  imageFallback: {
+    flex: 1,
     alignItems: "center",
     justifyContent: "center",
   },
-  avatarText: {
-    fontSize: 16,
+  imageFallbackText: {
+    fontSize: 18,
     fontWeight: "900",
-    color: "rgba(0,0,0,0.75)",
+    color: "rgba(0,0,0,0.70)",
     letterSpacing: 0.5,
   },
 
-  cardBody: { flex: 1 },
+  cardBody: {
+    flex: 1,
+    marginLeft: 12,
+    backgroundColor: PINK_CARD_SOFT, // gives the “pink card with softer inner feel”
+    borderRadius: 18,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    justifyContent: "space-between",
+  },
 
-  name: { fontSize: 13, fontWeight: "900", color: BLACK },
+  name: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: BLACK,
+  },
+
   meta: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "700",
     color: MUTED,
-    marginTop: 2,
+    marginTop: 4,
+    lineHeight: 16,
   },
+
+  bottomRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+  },
+
   price: {
-    marginTop: 6,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "900",
     color: BLACK,
   },
 
   rating: {
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 2,
-    width: 44,
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.55)",
   },
-  ratingText: { fontWeight: "900", fontSize: 11, color: BLACK },
+  ratingText: {
+    fontWeight: "900",
+    fontSize: 12,
+    color: BLACK,
+  },
 
   empty: {
     marginTop: 18,
