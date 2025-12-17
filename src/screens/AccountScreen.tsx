@@ -188,7 +188,7 @@ export default function AccountScreen({
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: PINK,
+    backgroundColor: OFF_WHITE,
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
   },
   container: { flex: 1, padding: 20 },
@@ -196,7 +196,7 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
 
   headerCard: {
-    backgroundColor: OFF_WHITE,
+    backgroundColor: PINK,
     borderRadius: 18,
     padding: 16,
     flexDirection: "row",
@@ -232,7 +232,7 @@ const styles = StyleSheet.create({
 
   menuCard: {
     marginTop: 16,
-    backgroundColor: OFF_WHITE,
+    backgroundColor: PINK,
     borderRadius: 18,
     borderWidth: 1,
     borderColor: BORDER,

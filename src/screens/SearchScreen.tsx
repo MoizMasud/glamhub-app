@@ -676,7 +676,7 @@ export default function SearchScreen({
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: PINK,
+    backgroundColor: OFF_WHITE,
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
   },
 

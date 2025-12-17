@@ -368,7 +368,7 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: PINK,
+    backgroundColor: OFF_WHITE,
     paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0,
   },
   screen: { flex: 1, padding: 20 },
@@ -404,7 +404,7 @@ const styles = StyleSheet.create({
   empty: {
     marginTop: 12,
     borderRadius: 16,
-    backgroundColor: OFF_WHITE,
+    backgroundColor: PINK,
     padding: 14,
   },
   emptyTitle: { fontWeight: "900", color: BLACK },
@@ -430,7 +430,7 @@ const styles = StyleSheet.create({
   bookingMetaStrong: { color: BLACK, fontWeight: "900" },
 
   statusPill: {
-    backgroundColor: OFF_WHITE,
+    backgroundColor: PINK,
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 7,
