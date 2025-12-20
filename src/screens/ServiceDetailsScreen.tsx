@@ -233,7 +233,12 @@ export default function ServiceDetailsScreen({
               <Pressable onPress={() => onPressArtist(service.artist_id)}>
                 <Text style={styles.artist}>
                   {service.artist?.username || "Artist"}
-                  {service.artist?.city ? ` • ${service.artist.city}` : ""}
+                  {service.artist?.city_label
+                  ? ` • ${service.artist.city_label}`
+                  : service.artist?.city
+                  ? ` • ${service.artist.city}`
+                  : ""}
+
                 </Text>
               </Pressable>
 

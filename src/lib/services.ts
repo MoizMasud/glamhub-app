@@ -15,9 +15,15 @@ export type ArtistPublic = {
   id: string;
   username: string | null;
   bio: string | null;
+
   city: string | null;
   role: "artist" | "client";
-  avatar_url: string | null; // ✅ add this
+  avatar_url: string | null;
+
+  // ✅ NEW: always present (nullable)
+  city_label: string | null;
+  city_lat: number | null;
+  city_lng: number | null;
 };
 
 export type MarketplaceService = ServiceRow & {
@@ -53,7 +59,9 @@ export async function listActiveServicesWithArtist() {
     .select(
       `
       id, artist_id, title, description, price_cents, duration_minutes, is_active, created_at,
-      artist:profiles!services_artist_id_profiles_fkey ( id, username, bio, city, role, avatar_url )
+      artist:profiles!services_artist_id_profiles_fkey (
+        id, username, bio, city, city_label, city_lat, city_lng, role, avatar_url
+      )
     `
     )
     .eq("is_active", true)
@@ -75,20 +83,19 @@ export async function getServiceDetails(serviceId: string) {
     .select(
       `
       id, artist_id, title, description, price_cents, duration_minutes, is_active, created_at,
-      artist:profiles ( id, username, bio, city, role, avatar_url )
+      artist:profiles ( id, username, bio, city, city_label, city_lat, city_lng, role, avatar_url )
     `
     )
     .eq("id", serviceId)
     .single();
 
-  // If it worked, normalize artist shape and return
   if (!error && data) {
     const r: any = data;
     const artist = Array.isArray(r.artist) ? (r.artist[0] ?? null) : (r.artist ?? null);
     return { ...r, artist } as MarketplaceService;
   }
 
-  // 2) Fallback: fetch the service only (works even if profiles relationship is blocked)
+  // 2) Fallback: fetch service only
   const { data: s, error: sErr } = await supabase
     .from("services")
     .select("id, artist_id, title, description, price_cents, duration_minutes, is_active, created_at")
@@ -97,11 +104,11 @@ export async function getServiceDetails(serviceId: string) {
 
   if (sErr) throw sErr;
 
-  // 3) Best-effort: fetch artist public profile separately (may be blocked by RLS for anon)
+  // 3) Best-effort: fetch profile separately
   let artist: any = null;
   const { data: p, error: pErr } = await supabase
     .from("profiles")
-    .select("id, username, bio, city, role, avatar_url")
+    .select("id, username, bio, city, city_label, city_lat, city_lng, role, avatar_url")
     .eq("id", (s as any).artist_id)
     .single();
 

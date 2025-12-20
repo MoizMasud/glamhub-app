@@ -49,12 +49,14 @@ export default function AccountScreen({
   onOpenSettings,
   onOpenBookings,
   onSignedOut,
+  onOpenEditProfile,
 }: {
   onBack: () => void;
   onOpenOnboarding: () => void;
   onOpenSettings: () => void;
   onOpenBookings: () => void;
   onSignedOut: () => void;
+  onOpenEditProfile: () => void;
 }) {
   const { user, signOut, profile, profileLoading, refreshProfile } = useAuth();
 
@@ -136,7 +138,12 @@ export default function AccountScreen({
         ) : (
           <>
             {/* Header card */}
-            <View style={styles.headerCard}>
+            <Pressable
+              onPress={onOpenEditProfile}
+              style={({ pressed }) => [styles.headerCard, pressed && { opacity: 0.95 }]}
+              accessibilityRole="button"
+              accessibilityLabel="Edit profile"
+            >
               <View style={styles.avatar}>
                 {avatarUrl ? (
                   <ExpoImage
@@ -145,10 +152,7 @@ export default function AccountScreen({
                     contentFit="cover"
                     cachePolicy="disk"
                     transition={0}
-                    onError={() => {
-                      // fallback to initial silently
-                      setAvatarUrl("");
-                    }}
+                    onError={() => setAvatarUrl("")}
                   />
                 ) : (
                   <Text style={styles.avatarText}>{initial}</Text>
@@ -161,7 +165,8 @@ export default function AccountScreen({
                   {email} • {isArtist ? "Artist" : "Client"}
                 </Text>
               </View>
-            </View>
+            </Pressable>
+
 
             {/* Menu */}
             <View style={styles.menuCard}>
@@ -227,7 +232,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 10,
-    backgroundColor: "rgba(255,255,255,0.35)",
+    backgroundColor: "rgba(0,0,0,0.05)",
   },
 
   menuCard: {

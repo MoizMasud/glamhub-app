@@ -1,3 +1,4 @@
+// ArtistProfileScreen.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
@@ -10,6 +11,8 @@ import {
   ActivityIndicator,
   ScrollView,
   Modal,
+  Linking,
+  TouchableOpacity,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { Image as ExpoImage } from "expo-image";
@@ -23,7 +26,6 @@ import {
 } from "../lib/services";
 import { useAuth } from "../context/AuthContext";
 
-// ✅ GlamHub palette
 const PINK = "#f6d6d6";
 const BLACK = "#000000";
 const OFF_WHITE = "#FFFFFF";
@@ -31,9 +33,7 @@ const OFF_WHITE = "#FFFFFF";
 const MUTED = "rgba(0,0,0,0.60)";
 const BORDER = "rgba(0,0,0,0.10)";
 const SOFT = "rgba(0,0,0,0.04)";
-const PILL_BG = "rgba(255,255,255,0.45)";
 
-// Price formatting: $80 (not $80.00) when whole dollars
 function formatPriceShort(cents: number) {
   const dollars = cents / 100;
   const isWhole = Math.round(dollars) === dollars;
@@ -52,9 +52,18 @@ async function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promi
   }
 }
 
+type ConsultationType = "zoom" | "google_meet";
+
 type ArtistProfileApi = {
   id: string;
   username?: string | null;
+  full_name?: string | null;
+  phone?: string | null;
+
+  consultation_enabled?: boolean | null;
+  consultation_type?: ConsultationType | string | null;
+  consultation_link?: string | null;
+
   pronouns?: string | null;
   rating?: number | null;
   bio?: string | null;
@@ -62,17 +71,32 @@ type ArtistProfileApi = {
   specialties?: string[] | null;
   avatar_url?: string | null;
   city?: string | null;
+  city_label?: string | null;
+  city_lat?: number | null;
+  city_lng?: number | null;
   role?: string | null;
 };
 
 type ArtistPublic = {
   id: string;
   username?: string | null;
+  full_name?: string | null;
+  phone?: string | null;
+
+  consultation_enabled?: boolean | null;
+  consultation_type?: ConsultationType | string | null;
+  consultation_link?: string | null;
+
   pronouns?: string | null;
   rating?: number | null;
   bio?: string | null;
   tags?: string[] | null;
-  avatarUrl?: string | null; // FINAL display url
+  avatarUrl?: string | null;
+
+  city?: string | null;
+  city_label?: string | null;
+  city_lat?: number | null;
+  city_lng?: number | null;
 };
 
 export default function ArtistProfileScreen({
@@ -104,10 +128,7 @@ export default function ArtistProfileScreen({
   const [details, setDetails] = useState<MarketplaceService | null>(null);
   const detailsServiceIdRef = useRef<string | null>(null);
 
-  const selectedIds = useMemo(
-    () => Object.keys(selected).filter((id) => selected[id]),
-    [selected]
-  );
+  const selectedIds = useMemo(() => Object.keys(selected).filter((id) => selected[id]), [selected]);
   const canBook = selectedIds.length > 0;
 
   const toggleSelected = (serviceId: string) => {
@@ -156,34 +177,33 @@ export default function ArtistProfileScreen({
       const self = !!meId && meId === artistId;
       setIsSelf(self);
 
-      // ✅ use one bust value for this load (don’t re-roll during render)
       const bust = Date.now();
       setAvatarBust(bust);
 
-        const profilePromise = (async () => {
-          const res = await supabase
-            .from("profiles")
-            .select("id, username, bio, city, role, avatar_url")
-            .eq("id", artistId)
-            .single();
-          return res; // { data, error }
-        })();
+      const profilePromise = (async () => {
+        const res = await supabase
+          .from("profiles")
+          .select(
+            "id, username, full_name, phone, consultation_enabled, consultation_type, consultation_link, bio, city, city_label, city_lat, city_lng, role, avatar_url"
+          )
+          .eq("id", artistId)
+          .single();
+        return res;
+      })();
 
-        const [pRes, s] = await Promise.all([
-          withTimeout(profilePromise, 12000, "Request timed out. Try again."),
-          withTimeout(listArtistActiveServices(artistId), 12000, "Request timed out. Try again."),
-        ]);
+      const [pRes, s] = await Promise.all([
+        withTimeout(profilePromise, 12000, "Request timed out. Try again."),
+        withTimeout(listArtistActiveServices(artistId), 12000, "Request timed out. Try again."),
+      ]);
 
-        if (pRes.error) throw pRes.error;
+      if (pRes.error) throw pRes.error;
 
-        const a = (pRes.data as ArtistProfileApi) ?? null;
-
+      const a = (pRes.data as ArtistProfileApi) ?? null;
 
       const rawAvatar = self ? myProfile?.avatar_url ?? null : a?.avatar_url ?? null;
       const publicAvatar = rawAvatar ? avatarPublicUrl(rawAvatar) : "";
       const displayAvatar = publicAvatar ? `${publicAvatar}?v=${bust}` : "";
 
-      // ✅ Prefetch avatar BEFORE rendering screen (prevents pop-in)
       if (displayAvatar) {
         await ExpoImage.prefetch(displayAvatar);
       }
@@ -191,11 +211,23 @@ export default function ArtistProfileScreen({
       setArtist({
         id: artistId,
         username: a?.username ?? "Artist",
+        full_name: a?.full_name ?? null,
+        phone: a?.phone ?? null,
+
+        consultation_enabled: !!a?.consultation_enabled,
+        consultation_type: a?.consultation_type ?? "zoom",
+        consultation_link: a?.consultation_link ?? null,
+
         pronouns: a?.pronouns ?? null,
         rating: a?.rating ?? null,
         bio: a?.bio ?? null,
         tags: a?.tags ?? a?.specialties ?? null,
         avatarUrl: publicAvatar || null,
+
+        city: a?.city ?? null,
+        city_label: a?.city_label ?? a?.city ?? null,
+        city_lat: a?.city_lat ?? null,
+        city_lng: a?.city_lng ?? null,
       });
 
       setServices(s ?? []);
@@ -241,9 +273,11 @@ export default function ArtistProfileScreen({
     onOpenBooking({ artistId, serviceIds: selectedIds });
   };
 
-  const headerName = artist?.username ?? "Artist";
-  const pronouns = artist?.pronouns ? `(${artist.pronouns})` : "";
-  const rating = artist?.rating != null ? Number(artist.rating).toFixed(1) : null;
+  const displayName = artist?.full_name?.trim() || artist?.username?.trim() || "Artist";
+  const cityText = (artist?.city_label ?? artist?.city ?? "").trim();
+
+  const consultationLabel =
+    artist?.consultation_type === "google_meet" ? "Consultation available (Google Meet)" : "Consultation available (Zoom)";
 
   if (loading) {
     return (
@@ -313,41 +347,51 @@ export default function ArtistProfileScreen({
                   ) : (
                     <View style={[styles.photo, styles.photoFallback]}>
                       <Text style={styles.photoFallbackText}>
-                        {(headerName?.trim()?.[0] ?? "G").toUpperCase()}
+                        {(displayName?.trim()?.[0] ?? "G").toUpperCase()}
                       </Text>
                     </View>
                   )}
                 </View>
 
-                <Text style={styles.name}>{headerName}</Text>
-
-                <View style={styles.metaRow}>
-                  {!!pronouns && <Text style={styles.metaText}>{pronouns}</Text>}
-                  {rating && (
-                    <View style={styles.ratingRow}>
-                      <Text style={styles.metaText}>{rating}</Text>
-                      <Text style={styles.star}>★</Text>
-                    </View>
-                  )}
-                </View>
-
-                {(artist.tags ?? []).length > 0 && (
-                  <View style={styles.pillsWrap}>
-                    {(artist.tags ?? []).slice(0, 6).map((t, idx) => (
-                      <View key={`${t}-${idx}`} style={styles.pill}>
-                        <Text style={styles.pillText}>{t}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
+                <Text style={styles.name}>{displayName}</Text>
+                {!!cityText && <Text style={styles.city}>{cityText}</Text>}
               </View>
 
-              <Text style={styles.sectionTitle}>About Me</Text>
+              <Text style={styles.sectionTitle}>About</Text>
               <Text style={styles.about}>
                 {artist.bio?.trim()
                   ? artist.bio
-                  : "Professional stylist focused on soft glam, textured hair, and personalized beauty services. I prioritize comfort, inclusivity, and results that feel authentically you."}
+                  : "Professional stylist focused on modern looks, strong hygiene standards, and client comfort."}
               </Text>
+
+              {!!artist.phone?.trim() && (
+                <>
+                  <Text style={[styles.sectionTitle, { marginTop: 18 }]}>Phone</Text>
+
+                  <TouchableOpacity
+                    onPress={() => {
+                      if (!artist.phone) return;
+                      Linking.openURL(`tel:${artist.phone}`);
+                    }}
+                    activeOpacity={0.6}
+                    style={styles.consultLine}
+                  >
+                    <Ionicons name="call-outline" size={18} color={BLACK} />
+                    <Text style={styles.infoText}>{artist.phone}</Text>
+                  </TouchableOpacity>
+
+
+
+                </>
+              )}
+
+              {/* ✅ Cleaner consultation display (no arrow, no click) */}
+              {!!artist.consultation_enabled && (
+                <View style={styles.consultLine}>
+                  <Ionicons name="videocam-outline" size={18} color={"rgba(0,0,0,0.70)"} />
+                  <Text style={styles.consultLineText}>{consultationLabel}</Text>
+                </View>
+              )}
 
               <Text style={[styles.sectionTitle, { marginTop: 18 }]}>Services</Text>
 
@@ -435,10 +479,7 @@ export default function ArtistProfileScreen({
                 <Text style={{ color: MUTED, fontWeight: "700" }}>{detailsError}</Text>
 
                 {!!detailsServiceIdRef.current && (
-                  <Pressable
-                    onPress={() => openDetails(detailsServiceIdRef.current as string)}
-                    style={styles.retryBtn}
-                  >
+                  <Pressable onPress={() => openDetails(detailsServiceIdRef.current as string)} style={styles.retryBtn}>
                     <Text style={styles.retryText}>Retry</Text>
                   </Pressable>
                 )}
@@ -508,18 +549,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.06)",
   },
-  bookBtnText: {
-    fontWeight: "900",
-    color: "rgba(0,0,0,0.75)",
-  },
+  bookBtnText: { fontWeight: "900", color: "rgba(0,0,0,0.75)" },
 
   fullCenter: { flex: 1, alignItems: "center", justifyContent: "center" },
 
-  headerBlock: {
-    alignItems: "center",
-    paddingTop: 8,
-    paddingBottom: 10,
-  },
+  headerBlock: { alignItems: "center", paddingTop: 8, paddingBottom: 10 },
 
   photoWrap: {
     width: 88,
@@ -531,63 +565,43 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.35)",
   },
   photo: { width: "100%", height: "100%" },
-  photoFallback: {
-    alignItems: "center",
-    justifyContent: "center",
+  photoFallback: { alignItems: "center", justifyContent: "center", backgroundColor: OFF_WHITE },
+  photoFallbackText: { fontSize: 30, fontWeight: "900", color: "rgba(0,0,0,0.70)" },
+
+  name: { marginTop: 10, fontSize: 22, fontWeight: "900", color: BLACK },
+  city: { marginTop: 4, color: "rgba(0,0,0,0.65)", fontWeight: "800" },
+
+  sectionTitle: { marginTop: 10, fontSize: 18, fontWeight: "900", color: BLACK },
+  about: { marginTop: 8, color: "rgba(0,0,0,0.65)", fontWeight: "700", lineHeight: 18 },
+
+  infoCard: {
+    marginTop: 10,
     backgroundColor: OFF_WHITE,
-  },
-  photoFallbackText: {
-    fontSize: 30,
-    fontWeight: "900",
-    color: "rgba(0,0,0,0.70)",
-  },
-
-  name: {
-    marginTop: 10,
-    fontSize: 22,
-    fontWeight: "900",
-    color: BLACK,
-  },
-
-  metaRow: {
-    marginTop: 4,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
   },
-  metaText: { color: "rgba(0,0,0,0.65)", fontWeight: "700" },
-  ratingRow: { flexDirection: "row", alignItems: "center", gap: 4 },
-  star: { color: "rgba(0,0,0,0.65)", fontWeight: "900" },
+  infoText: { fontWeight: "900", color: "rgba(0,0,0,0.78)" },
 
-  pillsWrap: {
-    marginTop: 10,
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "center",
-    gap: 10,
-  },
-  pill: {
-    backgroundColor: PILL_BG,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+  // ✅ simple consultation line
+  consultLine: {
+    marginTop: 16,
+    backgroundColor: "rgba(255,255,255,0.55)",
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.06)",
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
   },
-  pillText: { color: "rgba(0,0,0,0.70)", fontWeight: "800", fontSize: 12 },
-
-  sectionTitle: {
-    marginTop: 10,
-    fontSize: 18,
-    fontWeight: "900",
-    color: BLACK,
-  },
-  about: {
-    marginTop: 8,
-    color: "rgba(0,0,0,0.65)",
-    fontWeight: "700",
-    lineHeight: 18,
-  },
+  consultLineText: { color: "rgba(0,0,0,0.72)", fontWeight: "900" },
 
   servicesCard: {
     marginTop: 10,
@@ -604,30 +618,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  serviceRowBorder: {
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(0,0,0,0.06)",
-  },
+  serviceRowBorder: { borderBottomWidth: 1, borderBottomColor: "rgba(0,0,0,0.06)" },
 
-  serviceLeft: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingRight: 12,
-  },
-  checkboxHit: {
-    marginRight: 10,
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  serviceLeft: { flex: 1, flexDirection: "row", alignItems: "center", paddingRight: 12 },
+  checkboxHit: { marginRight: 10, alignItems: "center", justifyContent: "center" },
 
-  serviceName: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: "900",
-    color: BLACK,
-  },
-
+  serviceName: { flex: 1, fontSize: 14, fontWeight: "900", color: BLACK },
   serviceRight: { flexDirection: "row", alignItems: "center" },
   servicePrice: { fontSize: 14, fontWeight: "900", color: "rgba(0,0,0,0.78)" },
 
@@ -644,55 +640,18 @@ const styles = StyleSheet.create({
 
   errTitle: { fontSize: 16, fontWeight: "900", color: BLACK },
   errText: { marginTop: 8, color: MUTED, textAlign: "center", fontWeight: "700" },
-  retryBtn: {
-    marginTop: 12,
-    backgroundColor: BLACK,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
+  retryBtn: { marginTop: 12, backgroundColor: BLACK, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 10 },
   retryText: { color: OFF_WHITE, fontWeight: "900" },
 
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.25)",
-    padding: 18,
-    justifyContent: "center",
-  },
-  modalCard: {
-    backgroundColor: OFF_WHITE,
-    borderRadius: 18,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  modalHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 10,
-  },
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.25)", padding: 18, justifyContent: "center" },
+  modalCard: { backgroundColor: OFF_WHITE, borderRadius: 18, padding: 14, borderWidth: 1, borderColor: BORDER },
+  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
   modalTitle: { fontSize: 15, fontWeight: "900", color: BLACK },
-  modalCloseBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.05)",
-  },
+  modalCloseBtn: { width: 36, height: 36, borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.05)" },
 
   detailsName: { fontSize: 16, fontWeight: "900", color: BLACK, marginTop: 2 },
   detailsRow: { flexDirection: "row", gap: 10, marginTop: 10 },
-  detailsChip: {
-    backgroundColor: SOFT,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
+  detailsChip: { backgroundColor: SOFT, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: BORDER },
   detailsChipText: { fontWeight: "900", color: BLACK },
-
   detailsDesc: { marginTop: 10, color: MUTED, fontWeight: "700", lineHeight: 18 },
 });

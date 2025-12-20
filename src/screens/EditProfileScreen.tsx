@@ -12,6 +12,8 @@ import {
   ScrollView,
   ActivityIndicator,
   Modal,
+  Keyboard,
+  Switch,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
@@ -33,10 +35,21 @@ type MyProfile = {
   id: string;
   role?: "client" | "artist" | string | null;
   username?: string | null;
+
+  full_name?: string | null;
+  phone?: string | null;
+
   city?: string | null;
+  city_label?: string | null;
+  city_lat?: number | null;
+  city_lng?: number | null;
+
   bio?: string | null;
-  avatar_url?: string | null; // store STORAGE PATH (e.g. uid/avatar_123.jpg) OR legacy URL
+  avatar_url?: string | null;
   email?: string | null;
+
+  // ✅ NEW
+  allow_same_day_consultation?: boolean | null;
 };
 
 type ServiceRow = {
@@ -47,6 +60,15 @@ type ServiceRow = {
   description: string | null;
   is_active: boolean;
 };
+
+type LocationSuggestion = {
+  id: string;
+  label: string;
+  lat: number;
+  lng: number;
+};
+
+const locationCache = new Map<string, LocationSuggestion[]>();
 
 function centsFromDollarsText(input: string) {
   const n = Number(String(input).replace(/[^0-9.]/g, ""));
@@ -71,8 +93,12 @@ function contentTypeFromExt(ext: string) {
   return "image/jpeg";
 }
 
+function normalizeQuery(q: string) {
+  return q.trim().replace(/\s+/g, " ");
+}
+
 export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
-  const { refreshProfile } = useAuth(); // ✅ added
+  const { refreshProfile } = useAuth();
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -81,21 +107,36 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
 
   // Profile fields
   const [username, setUsername] = useState("");
+
+  // new fields
+  const [fullName, setFullName] = useState("");
+  const [phone, setPhone] = useState("");
+
+  // City + coords
   const [city, setCity] = useState("");
+  const [cityCoords, setCityCoords] = useState<{ lat: number; lng: number } | null>(null);
+
   const [bio, setBio] = useState("");
 
-  // Avatar:
-  // - avatarPath = what we store in DB (public bucket path OR legacy full URL)
-  // - avatarUrl  = what we show (public url)
+  // ✅ NEW setting
+  const [allowSameDayConsultation, setAllowSameDayConsultation] = useState(false);
+
+  // City suggestions
+  const [citySuggestions, setCitySuggestions] = useState<LocationSuggestion[]>([]);
+  const [citySuggestLoading, setCitySuggestLoading] = useState(false);
+  const [citySuggestSlow, setCitySuggestSlow] = useState(false);
+
+  // Avatar
   const [avatarPath, setAvatarPath] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
 
-  // Image upload state
+  // Upload state
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
-  // Artist toggle (only shown if user is not already an artist)
+  // Artist toggle
   const isArtist = useMemo(() => (profile?.role ?? "client") === "artist", [profile?.role]);
   const [artistMode, setArtistMode] = useState(false);
+  const effectiveArtist = isArtist || artistMode;
 
   // Services
   const [servicesLoading, setServicesLoading] = useState(false);
@@ -110,19 +151,14 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
   const [sDesc, setSDesc] = useState("");
   const [sActive, setSActive] = useState(true);
 
-  const effectiveArtist = isArtist || artistMode;
-
-  // Convert stored DB value -> displayable URL (PUBLIC BUCKET)
   const toDisplayAvatarUrl = async (stored: string | null | undefined) => {
     const val = (stored ?? "").trim();
     if (!val) return "";
 
-    // Legacy full URL already stored
     if (val.startsWith("http://") || val.startsWith("https://")) {
       return `${val}${val.includes("?") ? "&" : "?"}v=${Date.now()}`;
     }
 
-    // Public bucket → simple public URL
     const { data } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(val);
     return `${data.publicUrl}?v=${Date.now()}`;
   };
@@ -152,18 +188,27 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
 
       setProfile(p);
       setUsername(p.username ?? "");
-      setCity(p.city ?? "");
+
+      setFullName(p.full_name ?? "");
+      setPhone(p.phone ?? "");
+
+      const label = (p.city_label ?? p.city ?? "").trim();
+      setCity(label);
+
+      const lat = p.city_lat ?? null;
+      const lng = p.city_lng ?? null;
+      setCityCoords(typeof lat === "number" && typeof lng === "number" ? { lat, lng } : null);
+
       setBio(p.bio ?? "");
+
+      // ✅ NEW
+      setAllowSameDayConsultation(Boolean(p.allow_same_day_consultation));
 
       const stored = (p.avatar_url ?? "").trim();
       setAvatarPath(stored);
 
-      if (stored) {
-        const display = await toDisplayAvatarUrl(stored);
-        setAvatarUrl(display);
-      } else {
-        setAvatarUrl("");
-      }
+      if (stored) setAvatarUrl(await toDisplayAvatarUrl(stored));
+      else setAvatarUrl("");
 
       setArtistMode(false);
       await loadServices(p.id);
@@ -179,14 +224,107 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // City suggestions (Photon)
+  useEffect(() => {
+    const q = normalizeQuery(city);
+    if (!q || cityCoords) {
+      setCitySuggestions([]);
+      setCitySuggestLoading(false);
+      setCitySuggestSlow(false);
+      return;
+    }
+
+    let alive = true;
+
+    const t = setTimeout(async () => {
+      try {
+        setCitySuggestLoading(true);
+        setCitySuggestSlow(false);
+
+        const cacheKey = q.toLowerCase();
+        if (locationCache.has(cacheKey)) {
+          if (!alive) return;
+          setCitySuggestions(locationCache.get(cacheKey) ?? []);
+          setCitySuggestLoading(false);
+          return;
+        }
+
+        const slow = setTimeout(() => alive && setCitySuggestSlow(true), 900);
+
+        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=6`;
+        const res = await fetch(url);
+        const json = await res.json();
+
+        clearTimeout(slow);
+
+        const feats = Array.isArray(json?.features) ? json.features : [];
+        const rows: LocationSuggestion[] = feats
+          .map((f: any, idx: number) => {
+            const coords = f?.geometry?.coordinates;
+            const lng = Number(coords?.[0]);
+            const lat = Number(coords?.[1]);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+            const p = f?.properties ?? {};
+            const name = p?.name ?? "";
+            const city = p?.city ?? p?.county ?? "";
+            const state = p?.state ?? "";
+            const country = p?.country ?? "";
+            const label = [name || city, state, country].filter(Boolean).join(", ").trim() || q;
+
+            return { id: String(p?.osm_id ?? `${cacheKey}-${idx}`), label, lat, lng };
+          })
+          .filter(Boolean)
+          .slice(0, 6) as LocationSuggestion[];
+
+        locationCache.set(cacheKey, rows);
+
+        if (!alive) return;
+        setCitySuggestions(rows);
+      } catch {
+        if (!alive) return;
+        setCitySuggestions([]);
+      } finally {
+        if (!alive) return;
+        setCitySuggestLoading(false);
+      }
+    }, 250);
+
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [city, cityCoords]);
+
+  const pickCitySuggestion = (s: LocationSuggestion) => {
+    setCity(s.label);
+    setCityCoords({ lat: s.lat, lng: s.lng });
+    setCitySuggestions([]);
+    Keyboard.dismiss();
+  };
+
   const saveProfileOnly = async () => {
+    const label = city.trim() || null;
+    const lat = cityCoords?.lat ?? null;
+    const lng = cityCoords?.lng ?? null;
+
     await updateMyProfile({
       username: username.trim() || null,
-      city: city.trim() || null,
+      full_name: fullName.trim() || null,
+      phone: phone.trim() || null,
+      city: label,
       bio: bio.trim() || null,
-      // ✅ store PATH (or legacy URL)
       avatar_url: avatarPath.trim() || null,
-    });
+
+      // ✅ NEW (only meaningful for artists, safe to store anyway)
+      allow_same_day_consultation: effectiveArtist ? allowSameDayConsultation : false,
+
+      ...( {
+        city_label: label,
+        city_lat: lat,
+        city_lng: lng,
+      } as any),
+    } as any);
   };
 
   const onSave = async () => {
@@ -210,9 +348,7 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
         setArtistMode(false);
       }
 
-      // ✅ refresh global profile so avatar/username updates across app
       await refreshProfile();
-
       onBack();
     } catch (e: any) {
       Alert.alert("Error", e?.message ?? "Something went wrong.");
@@ -267,7 +403,6 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
       const uid = authData.user?.id;
       if (!uid) throw new Error("AUTH_MISSING_USER: No authenticated user found.");
 
-      // ✅ Read local file as bytes (fixes 0-byte uploads in RN)
       const fileRes = await fetch(uri);
       if (!fileRes.ok) throw new Error(`FILE_READ_ERROR: fetch(uri) failed (${fileRes.status}).`);
 
@@ -283,7 +418,6 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
 
       const path = `${uid}/avatar_${Date.now()}.${ext}`;
 
-      // ✅ Upload bytes instead of blob
       const { error: upErr } = await supabase.storage.from(AVATAR_BUCKET).upload(path, bytes, {
         contentType,
         upsert: true,
@@ -291,15 +425,12 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
 
       if (upErr) throw new Error(`STORAGE_UPLOAD_FAILED: ${upErr.message}`);
 
-      // ✅ Save path in profile
-      await updateMyProfile({ avatar_url: path });
+      await updateMyProfile({ avatar_url: path } as any);
 
-      // ✅ Public URL (bucket is public)
       const { data } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(path);
       const publicUrl = data?.publicUrl;
       if (!publicUrl) throw new Error("PUBLIC_URL_MISSING: Supabase did not return a public URL.");
 
-      // ✅ Optional: quick sanity check to ensure it's not 0 bytes again
       const test = await fetch(publicUrl, { method: "GET" });
       const len = test.headers.get("content-length") || "";
       if (!test.ok) throw new Error(`PUBLIC_URL_HTTP_ERROR: ${test.status}`);
@@ -311,7 +442,6 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
       setAvatarUrl(displayUrl);
       setProfile((prev) => (prev ? { ...prev, avatar_url: path } : prev));
 
-      // ✅ refresh global profile so avatar updates everywhere immediately
       await refreshProfile();
     } catch (e: any) {
       console.error("[Avatar Upload Error]", e);
@@ -344,7 +474,7 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
   const saveService = async () => {
     if (!profile?.id) return;
 
-    const title = sTitle.trim();
+    const title = sTitle.replace(/\s+/g, " ").trim();
     const price_cents = centsFromDollarsText(sPrice);
     const duration_minutes = Math.max(5, Number(sDuration || 0) || 60);
     const description = sDesc.trim() || null;
@@ -364,13 +494,7 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
       if (editingServiceId) {
         const { error } = await supabase
           .from("services")
-          .update({
-            title,
-            price_cents,
-            duration_minutes,
-            description,
-            is_active: sActive,
-          })
+          .update({ title, price_cents, duration_minutes, description, is_active: sActive })
           .eq("id", editingServiceId)
           .eq("artist_id", profile.id);
 
@@ -414,7 +538,6 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
-        {/* Header */}
         <View style={styles.topBar}>
           <Pressable onPress={onBack} style={styles.iconBtn} accessibilityRole="button">
             <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
@@ -430,12 +553,7 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
             <ActivityIndicator />
           </View>
         ) : (
-          <ScrollView
-            contentContainerStyle={styles.screen}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-            {/* Artist toggle (only if not already artist) */}
+          <ScrollView contentContainerStyle={styles.screen} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
             {!isArtist && (
               <View style={styles.card}>
                 <View style={styles.toggleHeader}>
@@ -448,19 +566,14 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
                     accessibilityLabel="Toggle artist mode"
                   >
                     <View style={[styles.toggleDot, artistMode && styles.toggleDotOn]} />
-                    <Text style={[styles.togglePillText, artistMode && { color: OFF_WHITE }]}>
-                      {artistMode ? "On" : "Off"}
-                    </Text>
+                    <Text style={[styles.togglePillText, artistMode && { color: OFF_WHITE }]}>{artistMode ? "On" : "Off"}</Text>
                   </Pressable>
                 </View>
 
-                <Text style={styles.help}>
-                  Turn this on only if you offer services. You’ll be able to add services and appear in search.
-                </Text>
+                <Text style={styles.help}>Turn this on only if you offer services. You’ll be able to add services and appear in search.</Text>
               </View>
             )}
 
-            {/* Profile card */}
             <View style={styles.card}>
               <View style={styles.profileImageRow}>
                 <Text style={styles.label}>Profile picture</Text>
@@ -480,7 +593,7 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
                           source={{ uri: avatarUrl.trim() }}
                           style={styles.avatarImg}
                           contentFit="cover"
-                          cachePolicy="none" // keep as-is (your debug setting)
+                          cachePolicy="none"
                           onError={async () => {
                             const url = avatarUrl.trim();
                             const info = await probeImageUrl(url);
@@ -511,17 +624,54 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
                 </Pressable>
               </View>
 
+              <Text style={styles.sectionTitle}>Profile Details</Text>
+
+              <Text style={styles.label}>Full name</Text>
+              <TextInput value={fullName} onChangeText={setFullName} style={styles.input} placeholder="e.g. Mazzy Khan" autoCapitalize="words" />
+
               <Text style={styles.label}>Username</Text>
-              <TextInput
-                value={username}
-                onChangeText={setUsername}
-                style={styles.input}
-                placeholder="e.g. glamByMazzy"
-                autoCapitalize="none"
-              />
+              <TextInput value={username} onChangeText={setUsername} style={styles.input} placeholder="e.g. glamByMazzy" autoCapitalize="none" />
+
+              <Text style={styles.label}>Phone</Text>
+              <TextInput value={phone} onChangeText={setPhone} style={styles.input} placeholder="e.g. +1 416 555 0192" keyboardType="phone-pad" />
 
               <Text style={styles.label}>City</Text>
-              <TextInput value={city} onChangeText={setCity} style={styles.input} placeholder="e.g. Toronto" />
+
+              <View style={{ position: "relative" }}>
+                <TextInput
+                  value={city}
+                  onChangeText={(t) => {
+                    setCity(t);
+                    setCityCoords(null);
+                  }}
+                  style={styles.input}
+                  placeholder="e.g. Toronto"
+                  autoCapitalize="words"
+                />
+
+                {(citySuggestLoading || citySuggestions.length > 0 || citySuggestSlow) && !cityCoords && city.trim().length > 0 && (
+                  <View style={styles.suggestBox}>
+                    {citySuggestions.length > 0 ? (
+                      citySuggestions.map((s) => (
+                        <Pressable key={s.id} onPress={() => pickCitySuggestion(s)} style={styles.suggestItem}>
+                          <Text numberOfLines={2} style={styles.suggestText}>
+                            {s.label}
+                          </Text>
+                        </Pressable>
+                      ))
+                    ) : citySuggestLoading ? (
+                      <View style={styles.suggestLoading}>
+                        <ActivityIndicator />
+                        <Text style={styles.suggestLoadingText}>{citySuggestSlow ? "Still searching…" : "Searching…"}</Text>
+                      </View>
+                    ) : (
+                      <View style={styles.suggestLoading}>
+                        <Text style={styles.suggestLoadingText}>No suggestions</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+              </View>
 
               <Text style={styles.label}>Bio</Text>
               <TextInput
@@ -531,9 +681,27 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
                 placeholder="What do you specialize in? What should clients know?"
                 multiline
               />
+
+              {/* ✅ NEW: Same-day consultation setting (artist only) */}
+              {effectiveArtist && (
+                <View style={styles.settingRow}>
+                  <View style={{ flex: 1, paddingRight: 10 }}>
+                    <Text style={styles.settingTitle}>Allow same-day consultation</Text>
+                    <Text style={styles.settingSub}>
+                      If enabled, clients can schedule consultation on the booking date.
+                    </Text>
+                  </View>
+
+                  <Switch value={allowSameDayConsultation} onValueChange={setAllowSameDayConsultation} />
+                </View>
+              )}
+
+              <Pressable disabled={saving} onPress={onSave} style={styles.primaryBtn} accessibilityRole="button">
+                <Text style={styles.primaryBtnText}>{saving ? "Saving..." : "Save"}</Text>
+              </Pressable>
             </View>
 
-            {/* Services (only visible when artist OR artistMode ON) */}
+            {/* Services */}
             {effectiveArtist && (
               <View style={styles.card}>
                 <View style={styles.servicesHeader}>
@@ -562,22 +730,17 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
                           <Pressable onPress={() => openEditService(s)} style={{ flex: 1 }} accessibilityRole="button">
                             <Text style={styles.serviceTitle}>{s.title}</Text>
                             <Text style={styles.serviceMeta}>
-                              ${dollarsFromCents(s.price_cents)} • {s.duration_minutes} min
-                              {s.is_active ? "" : " • Hidden"}
+                              ${dollarsFromCents(s.price_cents)} • {s.duration_minutes} min{s.is_active ? "" : " • Hidden"}
                             </Text>
                           </Pressable>
 
                           <View style={styles.serviceActions}>
                             <Pressable onPress={() => toggleServiceActive(s)} style={styles.iconPill}>
-                              <Ionicons
-                                name={s.is_active ? "eye-outline" : "eye-off-outline"}
-                                size={18}
-                                color={"rgba(0,0,0,0.75)"}
-                              />
+                              <Ionicons name={s.is_active ? "eye-outline" : "eye-off-outline"} size={18} color={BLACK} />
                             </Pressable>
 
                             <Pressable onPress={() => openEditService(s)} style={styles.iconPill}>
-                              <Ionicons name="create-outline" size={18} color={"rgba(0,0,0,0.75)"} />
+                              <Ionicons name="create-outline" size={18} color={BLACK} />
                             </Pressable>
                           </View>
                         </View>
@@ -588,21 +751,19 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
               </View>
             )}
 
-            {/* Bottom button always Save */}
-            <Pressable disabled={saving || uploadingAvatar} onPress={onSave} style={styles.primaryBtn}>
-              <Text style={styles.primaryBtnText}>{saving ? "..." : "Save"}</Text>
-            </Pressable>
+            <View style={{ height: 14 }} />
           </ScrollView>
         )}
       </View>
 
-      {/* Service editor modal */}
-      <Modal transparent visible={serviceModalOpen} animationType="fade" onRequestClose={() => setServiceModalOpen(false)}>
-        <View style={styles.modalBackdrop}>
+      {/* Service Modal */}
+      <Modal transparent animationType="fade" visible={serviceModalOpen} onRequestClose={() => setServiceModalOpen(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setServiceModalOpen(false)} />
+        <View style={styles.modalWrap}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{editingServiceId ? "Edit Service" : "Add Service"}</Text>
-              <Pressable onPress={() => setServiceModalOpen(false)} style={styles.modalCloseBtn}>
+              <Text style={styles.sectionTitle}>{editingServiceId ? "Edit Service" : "Add Service"}</Text>
+              <Pressable onPress={() => setServiceModalOpen(false)} style={styles.iconPill}>
                 <Ionicons name="close" size={18} color={BLACK} />
               </Pressable>
             </View>
@@ -612,24 +773,12 @@ export default function EditProfileScreen({ onBack }: { onBack: () => void }) {
 
             <View style={{ flexDirection: "row", gap: 10 }}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.label}>Price ($)</Text>
-                <TextInput
-                  value={sPrice}
-                  onChangeText={setSPrice}
-                  style={styles.input}
-                  placeholder="e.g. 80"
-                  keyboardType="numeric"
-                />
+                <Text style={styles.label}>Price</Text>
+                <TextInput value={sPrice} onChangeText={setSPrice} style={styles.input} placeholder="e.g. 75" keyboardType="numeric" />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.label}>Duration (min)</Text>
-                <TextInput
-                  value={sDuration}
-                  onChangeText={setSDuration}
-                  style={styles.input}
-                  placeholder="e.g. 60"
-                  keyboardType="numeric"
-                />
+                <TextInput value={sDuration} onChangeText={setSDuration} style={styles.input} placeholder="60" keyboardType="numeric" />
               </View>
             </View>
 
@@ -686,9 +835,88 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.06)",
   },
 
-  avatarPressable: {
-    alignSelf: "flex-start",
+  center: { flex: 1, alignItems: "center", justifyContent: "center" },
+
+  screen: { padding: 16, gap: 12, paddingBottom: 24 },
+
+  card: {
+    borderRadius: 18,
+    padding: 14,
+    backgroundColor: PINK,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.10)",
+    gap: 8,
   },
+
+  sectionTitle: { fontSize: 16, fontWeight: "900", color: BLACK, marginTop: 4 },
+
+  label: { fontWeight: "900", color: BLACK, marginTop: 6 },
+
+  help: { marginTop: 6, color: MUTED, fontWeight: "700", fontSize: 12, lineHeight: 16 },
+
+  input: {
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.14)",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    backgroundColor: OFF_WHITE,
+    color: BLACK,
+    fontWeight: "800",
+    marginTop: 6,
+  },
+
+  settingRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.10)",
+    backgroundColor: OFF_WHITE,
+  },
+  settingTitle: { fontWeight: "900", color: BLACK },
+  settingSub: { marginTop: 4, fontWeight: "800", color: MUTED, fontSize: 12, lineHeight: 16 },
+
+  suggestBox: {
+    position: "absolute",
+    top: 58,
+    left: 0,
+    right: 0,
+    backgroundColor: OFF_WHITE,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.12)",
+    overflow: "hidden",
+    zIndex: 50,
+  },
+  suggestItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(0,0,0,0.06)",
+  },
+  suggestText: { fontWeight: "800", color: BLACK, opacity: 0.86, fontSize: 13 },
+  suggestLoading: { padding: 12, flexDirection: "row", gap: 10, alignItems: "center" },
+  suggestLoadingText: { fontWeight: "800", color: BLACK, opacity: 0.7 },
+
+  profileImageRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+
+  avatarPressable: { alignSelf: "flex-start" },
+
+  avatarWrap: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: OFF_WHITE,
+  },
+  avatarImg: { width: "100%", height: "100%" },
+  avatarFallback: { flex: 1, alignItems: "center", justifyContent: "center" },
 
   avatarEditBadge: {
     position: "absolute",
@@ -704,52 +932,31 @@ const styles = StyleSheet.create({
     borderColor: OFF_WHITE,
   },
 
-  center: { flex: 1, alignItems: "center", justifyContent: "center" },
-
-  screen: { padding: 16, gap: 12, paddingBottom: 24 },
-
-  card: {
-    borderRadius: 18,
-    padding: 14,
-    backgroundColor: PINK,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.10)",
-    gap: 8,
-  },
-
-  sectionTitle: { fontSize: 16, fontWeight: "900", color: BLACK },
-
-  label: { fontWeight: "900", color: BLACK, marginTop: 6 },
-
-  help: { marginTop: 6, color: MUTED, fontWeight: "700", fontSize: 12, lineHeight: 16 },
-
-  input: {
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.14)",
-    borderRadius: 12,
-    paddingHorizontal: 12,
+  primaryBtn: {
+    marginTop: 10,
+    backgroundColor: BLACK,
+    borderRadius: 14,
     paddingVertical: 12,
-    backgroundColor: OFF_WHITE,
-    color: BLACK,
-    fontWeight: "800",
+    alignItems: "center",
   },
-  profileImageRow: {
+  primaryBtnText: { color: OFF_WHITE, fontWeight: "900" },
+
+  toggleHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  togglePill: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-  },
-
-  avatarWrap: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: BORDER,
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
     backgroundColor: OFF_WHITE,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.12)",
   },
-  avatarImg: { width: "100%", height: "100%" },
-  avatarFallback: { flex: 1, alignItems: "center", justifyContent: "center" },
+  togglePillOn: { backgroundColor: BLACK, borderColor: BLACK },
+  toggleDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: "rgba(0,0,0,0.25)" },
+  toggleDotOn: { backgroundColor: OFF_WHITE },
+  togglePillText: { fontWeight: "900", color: BLACK },
 
   servicesHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   smallBtn: {
@@ -797,60 +1004,28 @@ const styles = StyleSheet.create({
   serviceMeta: { marginTop: 4, fontWeight: "800", color: MUTED, fontSize: 12 },
   serviceActions: { flexDirection: "row", gap: 8 },
   iconPill: {
-    width: 36,
-    height: 36,
+    width: 34,
+    height: 34,
     borderRadius: 12,
+    backgroundColor: "rgba(0,0,0,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.35)" },
+  modalWrap: { flex: 1, justifyContent: "center", padding: 16 },
+  modalCard: {
+    backgroundColor: OFF_WHITE,
+    borderRadius: 18,
+    padding: 14,
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.10)",
-    backgroundColor: "rgba(0,0,0,0.04)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  primaryBtn: {
-    backgroundColor: BLACK,
-    borderRadius: 14,
-    paddingVertical: 14,
-    alignItems: "center",
-  },
-  primaryBtnText: { color: OFF_WHITE, fontWeight: "900" },
-
-  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.25)", padding: 18, justifyContent: "center" },
-  modalCard: { backgroundColor: OFF_WHITE, borderRadius: 18, padding: 14, borderWidth: 1, borderColor: BORDER },
-  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
-  modalTitle: { fontSize: 15, fontWeight: "900", color: BLACK },
-  modalCloseBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.05)",
-  },
-
-  toggleRow: { marginTop: 10, flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 6 },
-  toggleText: { fontWeight: "900", color: "rgba(0,0,0,0.75)" },
-
-  // Artist toggle pill
-  toggleHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  togglePill: {
-    flexDirection: "row",
-    alignItems: "center",
     gap: 8,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.14)",
-    backgroundColor: OFF_WHITE,
   },
-  togglePillOn: { backgroundColor: BLACK, borderColor: BLACK },
-  toggleDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.20)",
-  },
-  toggleDotOn: { backgroundColor: OFF_WHITE },
-  togglePillText: { fontWeight: "900", color: BLACK },
+  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+
+  toggleRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingTop: 8 },
+  toggleText: { fontWeight: "900", color: BLACK, opacity: 0.75 },
 });

@@ -1,7 +1,5 @@
-// App.tsx
 import React from "react";
 import { View, StyleSheet, Text, Pressable, Image, Platform } from "react-native";
-import Constants from "expo-constants";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
@@ -11,13 +9,13 @@ import SearchScreen, { MarketplaceFilters } from "./src/screens/SearchScreen";
 import MarketplaceScreen from "./src/screens/MarketplaceScreen";
 import AccountScreen from "./src/screens/AccountScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
-import ArtistOnboardingScreen from "./src/screens/EditProfileScreen";
+
+// ✅ onboarding = Edit Profile
+import EditProfileScreen from "./src/screens/EditProfileScreen";
+
 import ArtistProfileScreen from "./src/screens/ArtistProfileScreen";
 import ServiceDetailsScreen from "./src/screens/ServiceDetailsScreen";
-import BookingsScreen from "./src/screens/BookingsScreen"; // list of bookings
-import BookingScreen from "./src/screens/BookingScreen";   // booking flow
-
-// ✅ NEW booking screens you just added
+import BookingsScreen from "./src/screens/MyBookingsScreen";
 import BookingSelectedScreen from "./src/screens/BookingSelectedScreen";
 
 const OFF_WHITE = "#FFFFFF";
@@ -25,7 +23,6 @@ const BLACK = "#000000";
 const GREY = "rgba(0,0,0,0.38)";
 const BORDER = "rgba(0,0,0,0.08)";
 
-// ✅ transparent logo with black text (no circle/background)
 const GH_LOGO = require("./assets/gh-white.png");
 
 type Route =
@@ -35,7 +32,7 @@ type Route =
   | { name: "auth" }
   | { name: "account" }
   | { name: "settings" }
-  | { name: "onboarding" }
+  | { name: "onboarding" } // keep onboarding
   | { name: "artist"; artistId: string; selectedServiceId?: string | null }
   | { name: "service"; serviceId: string; autoBook?: boolean }
   | { name: "booking"; artistId: string; initialServiceIds?: string[] }
@@ -52,63 +49,37 @@ function TabBar({
   onGo: (name: TabName) => void;
   isLoggedIn: boolean;
 }) {
-  const TabIcon = ({
-    name,
-    children,
-    accessibilityLabel,
-  }: {
-    name: TabName;
-    children: React.ReactNode;
-    accessibilityLabel: string;
-  }) => (
-    <Pressable
-      onPress={() => onGo(name)}
-      style={styles.tabIconBtn}
-      accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel}
-    >
-      {children}
-    </Pressable>
-  );
-
-  const isActive = (n: TabName) => active === n;
-
   return (
     <View style={styles.footer}>
-      <TabIcon name="search" accessibilityLabel="Search">
-        <Image
-          source={GH_LOGO}
-          resizeMode="contain"
-          style={[styles.logoIcon, { opacity: isActive("search") ? 1 : 0.45 }]}
-        />
-      </TabIcon>
+      <Pressable onPress={() => onGo("search")} style={styles.tabIconBtn}>
+        <Image source={GH_LOGO} resizeMode="contain" style={styles.logoIcon} />
+      </Pressable>
 
-      <TabIcon name="marketplace" accessibilityLabel="Marketplace">
+      <Pressable onPress={() => onGo("marketplace")} style={styles.tabIconBtn}>
         <Ionicons
-          name={isActive("marketplace") ? "grid" : "grid-outline"}
+          name={active === "marketplace" ? "grid" : "grid-outline"}
           size={26}
-          color={isActive("marketplace") ? BLACK : GREY}
+          color={active === "marketplace" ? BLACK : GREY}
         />
-      </TabIcon>
+      </Pressable>
 
-      {/* ✅ Only show when logged in */}
       {isLoggedIn && (
-        <TabIcon name="bookings" accessibilityLabel="Bookings">
+        <Pressable onPress={() => onGo("bookings")} style={styles.tabIconBtn}>
           <Ionicons
-            name={isActive("bookings") ? "calendar" : "calendar-outline"}
+            name={active === "bookings" ? "calendar" : "calendar-outline"}
             size={26}
-            color={isActive("bookings") ? BLACK : GREY}
+            color={active === "bookings" ? BLACK : GREY}
           />
-        </TabIcon>
+        </Pressable>
       )}
 
-      <TabIcon name="account" accessibilityLabel="Account">
+      <Pressable onPress={() => onGo("account")} style={styles.tabIconBtn}>
         <Ionicons
-          name={isActive("account") ? "person-circle" : "person-circle-outline"}
+          name={active === "account" ? "person-circle" : "person-circle-outline"}
           size={26}
-          color={isActive("account") ? BLACK : GREY}
+          color={active === "account" ? BLACK : GREY}
         />
-      </TabIcon>
+      </Pressable>
     </View>
   );
 }
@@ -118,32 +89,34 @@ function Root() {
 
   const [route, setRoute] = React.useState<Route>({ name: "search" });
   const [postAuthRoute, setPostAuthRoute] = React.useState<Route | null>(null);
-  const prevUserIdRef = React.useRef<string | null>(null);
 
   const lastFiltersRef = React.useRef<MarketplaceFilters | null>(null);
+  const prevUserIdRef = React.useRef<string | null>(null);
 
+  // ✅ Restore redirect after login
   React.useEffect(() => {
     const prev = prevUserIdRef.current;
     const next = user?.id ?? null;
 
-    // When user logs in on Auth screen → go back where we wanted
+    // user just logged in while on auth
     if (route.name === "auth" && !prev && next) {
       if (postAuthRoute) {
         setRoute(postAuthRoute);
         setPostAuthRoute(null);
       } else {
+        // default: go to account
         setRoute({ name: "account" });
       }
     }
 
-    prevUserIdRef.current = next;
-  }, [route.name, user, postAuthRoute]);
-
-  React.useEffect(() => {
-    if (route.name === "search" || route.name === "marketplace") {
-      lastFiltersRef.current = route.filters ?? lastFiltersRef.current;
+    // user logged out → go to marketplace
+    if (!!prev && !next) {
+      setRoute({ name: "marketplace", filters: lastFiltersRef.current });
+      setPostAuthRoute(null);
     }
-  }, [route]);
+
+    prevUserIdRef.current = next;
+  }, [route.name, user?.id, postAuthRoute]);
 
   if (loading) {
     return (
@@ -153,44 +126,30 @@ function Root() {
     );
   }
 
-  const showTabs =
-    route.name === "search" ||
-    route.name === "marketplace" ||
-    route.name === "account" ||
-    route.name === "bookings" ||
-    route.name === "settings";
-
-  const activeTab: TabName =
-    route.name === "marketplace"
-      ? "marketplace"
-      : route.name === "bookings"
-      ? "bookings"
-      : route.name === "account" || route.name === "settings"
-      ? "account"
-      : "search";
-
-  // Auth (no footer)
+  // 🔐 AUTH (no tabs)
   if (route.name === "auth") {
     return (
       <AuthScreen
-        onBack={() => setRoute({ name: "marketplace", filters: lastFiltersRef.current })}
+        onBack={() => {
+          // go back to marketplace by default
+          setRoute({ name: "marketplace", filters: lastFiltersRef.current });
+        }}
       />
     );
   }
 
-  // Deep screens (no footer)
+  // ✅ ONBOARDING = EDIT PROFILE
   if (route.name === "onboarding") {
-    return <ArtistOnboardingScreen onBack={() => setRoute({ name: "account" })} />;
+    return <EditProfileScreen onBack={() => setRoute({ name: "account" })} />;
   }
 
-  // ✅ Artist Profile (now uses popup + select + book)
+  // 👤 ARTIST PROFILE
   if (route.name === "artist") {
     return (
       <ArtistProfileScreen
         artistId={route.artistId}
         onBack={() => setRoute({ name: "marketplace", filters: lastFiltersRef.current })}
         onOpenBooking={({ artistId, serviceIds }) => {
-          // if not logged in, go auth then return here
           if (!user) {
             setPostAuthRoute({ name: "bookingSelected", artistId, serviceIds });
             setRoute({ name: "auth" });
@@ -206,27 +165,6 @@ function Root() {
     );
   }
 
-  // ✅ Booking (full flow: choose services + date + time)
-  if (route.name === "booking") {
-    return (
-      <BookingScreen
-        artistId={route.artistId}
-        initialServiceIds={route.initialServiceIds ?? []}
-        onBack={() => setRoute({ name: "artist", artistId: route.artistId })}
-        onRequestSignIn={() => {
-          setPostAuthRoute({
-            name: "booking",
-            artistId: route.artistId,
-            initialServiceIds: route.initialServiceIds ?? [],
-          });
-          setRoute({ name: "auth" });
-        }}
-        onBooked={() => setRoute({ name: "account" })}
-      />
-    );
-  }
-
-  // ✅ Booking Selected (services already chosen on profile)
   if (route.name === "bookingSelected") {
     return (
       <BookingSelectedScreen
@@ -246,7 +184,7 @@ function Root() {
     );
   }
 
-  // Service details still supported from marketplace
+  // 🧾 SERVICE
   if (route.name === "service") {
     return (
       <ServiceDetailsScreen
@@ -263,9 +201,24 @@ function Root() {
     );
   }
 
+  const activeTab: TabName =
+    route.name === "marketplace"
+      ? "marketplace"
+      : route.name === "bookings"
+      ? "bookings"
+      : route.name === "account" || route.name === "settings"
+      ? "account"
+      : "search";
+
+  const showTabs =
+    route.name === "search" ||
+    route.name === "marketplace" ||
+    route.name === "account" ||
+    route.name === "bookings" ||
+    route.name === "settings";
+
   return (
     <View style={{ flex: 1 }}>
-      {/* Search */}
       {route.name === "search" && (
         <SearchScreen
           initialFilters={route.filters ?? null}
@@ -273,20 +226,17 @@ function Root() {
             lastFiltersRef.current = filters;
             setRoute({ name: "marketplace", filters });
           }}
-          onSkip={() =>
-            setRoute({ name: "marketplace", filters: route.filters ?? lastFiltersRef.current })
-          }
         />
       )}
 
-      {/* Marketplace */}
       {route.name === "marketplace" && (
         <MarketplaceScreen
           filters={route.filters ?? null}
-          onEditFilters={() =>
-            setRoute({ name: "search", filters: route.filters ?? lastFiltersRef.current })
-          }
-          onRequestSignIn={() => setRoute({ name: "auth" })}
+          onEditFilters={() => setRoute({ name: "search", filters: route.filters })}
+          onRequestSignIn={() => {
+            setPostAuthRoute({ name: "marketplace", filters: lastFiltersRef.current });
+            setRoute({ name: "auth" });
+          }}
           onOpenAccount={() => {
             if (user) setRoute({ name: "account" });
             else {
@@ -301,21 +251,19 @@ function Root() {
         />
       )}
 
-      {/* Account */}
       {route.name === "account" && (
         <AccountScreen
           onBack={() => setRoute({ name: "marketplace", filters: lastFiltersRef.current })}
           onOpenBookings={() => setRoute({ name: "bookings" })}
+          onOpenEditProfile={() => setRoute({ name: "onboarding" })}
           onOpenOnboarding={() => setRoute({ name: "onboarding" })}
           onOpenSettings={() => setRoute({ name: "settings" })}
           onSignedOut={() => setRoute({ name: "marketplace", filters: lastFiltersRef.current })}
         />
       )}
 
-      {/* ✅ Bookings */}
       {route.name === "bookings" && <BookingsScreen onBack={() => setRoute({ name: "account" })} />}
 
-      {/* ✅ Settings */}
       {route.name === "settings" && <SettingsScreen onBack={() => setRoute({ name: "account" })} />}
 
       {showTabs && (
@@ -323,33 +271,21 @@ function Root() {
           active={activeTab}
           isLoggedIn={!!user}
           onGo={(name) => {
-            if (name === "search") {
-              setRoute({ name: "search", filters: lastFiltersRef.current });
-              return;
-            }
-
-            if (name === "marketplace") {
-              setRoute({ name: "marketplace", filters: lastFiltersRef.current });
-              return;
-            }
+            if (name === "search") setRoute({ name: "search", filters: lastFiltersRef.current });
+            if (name === "marketplace") setRoute({ name: "marketplace", filters: lastFiltersRef.current });
 
             if (name === "bookings") {
               if (!user) {
                 setPostAuthRoute({ name: "bookings" });
                 setRoute({ name: "auth" });
-              } else {
-                setRoute({ name: "bookings" });
-              }
-              return;
+              } else setRoute({ name: "bookings" });
             }
 
             if (name === "account") {
               if (!user) {
                 setPostAuthRoute({ name: "account" });
                 setRoute({ name: "auth" });
-              } else {
-                setRoute({ name: "account" });
-              }
+              } else setRoute({ name: "account" });
             }
           }}
         />
@@ -386,11 +322,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.08,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: -8 },
-    elevation: 10,
   },
 
   tabIconBtn: {

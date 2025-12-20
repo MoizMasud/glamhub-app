@@ -4,12 +4,12 @@ import {
   Text,
   Pressable,
   StyleSheet,
-  ActivityIndicator,
-  Alert,
-  ScrollView,
   SafeAreaView,
   Platform,
   StatusBar,
+  ActivityIndicator,
+  Alert,
+  ScrollView,
   Dimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -23,12 +23,9 @@ const BLACK = "#000000";
 const WHITE = "#FFFFFF";
 const PINK_CARD = "#F6D6D6";
 const MUTED = "rgba(0,0,0,0.60)";
-const MUTED_2 = "rgba(0,0,0,0.45)";
-const CHIP_BORDER = "rgba(0,0,0,0.14)";
 const BORDER = "rgba(0,0,0,0.08)";
 
 const { width: SCREEN_W } = Dimensions.get("window");
-const CHIP_MAX_W = Math.min(240, Math.floor(SCREEN_W * 0.62));
 
 function formatPriceCAD(cents: number) {
   return `$${(cents / 100).toFixed(0)} CAD`;
@@ -55,22 +52,20 @@ function bulletMetaFromService(s: MarketplaceService) {
   return tokens.join(" • ");
 }
 
-function compactCityLabel(raw?: string) {
-  const s = String(raw ?? "").trim();
-  if (!s) return "";
-  const noNear = s.replace(/^near\s+/i, "").trim();
-  const first = noNear.split(",")[0]?.trim() ?? "";
-  if (first.length <= 22) return first || noNear;
-  const words = noNear.split(/\s+/).filter(Boolean);
-  return words.slice(0, 2).join(" ");
-}
+// ✅ Haversine distance (km)
+function distanceKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
 
-type ClearFlags = {
-  service?: boolean;
-  price?: boolean;
-  location?: boolean;
-  rating?: boolean;
-};
+  const sin1 = Math.sin(dLat / 2);
+  const sin2 = Math.sin(dLng / 2);
+
+  const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
 
 export default function MarketplaceScreen({
   onRequestSignIn,
@@ -89,29 +84,21 @@ export default function MarketplaceScreen({
 }) {
   const [loading, setLoading] = useState(true);
   const [services, setServices] = useState<MarketplaceService[]>([]);
-  const [clears, setClears] = useState<ClearFlags>({});
   const [isLoggedIn, setIsLoggedIn] = useState(false);
 
-  // ✅ FIX: define effectiveFilters so title works
   const effectiveFilters = filters ?? null;
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setIsLoggedIn(!!data.user));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
-      setIsLoggedIn(!!s?.user);
-    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setIsLoggedIn(!!s?.user));
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  function titleFromFilters(filters?: MarketplaceFilters | null) {
-    if (!filters) return "Discover Artists";
-
+  function titleFromFilters(f?: MarketplaceFilters | null) {
+    if (!f) return "Discover Artists";
     const parts: string[] = [];
-
-    if (filters.service) parts.push(filters.service);
-    if (filters.locationText) parts.push(filters.locationText);
-    if (filters.minPriceCents || filters.maxPriceCents) parts.push("Services");
-
+    if (f.service) parts.push(f.service);
+    if (f.locationText) parts.push(f.locationText);
     return parts.length ? parts.join(" • ") : "Discover Artists";
   }
 
@@ -134,22 +121,41 @@ export default function MarketplaceScreen({
     const f: any = filters ?? null;
 
     return services.filter((s) => {
+      // service text match
       if (f?.service) {
         const svc = String(f.service).toLowerCase();
         if (!`${s.title} ${s.description ?? ""}`.toLowerCase().includes(svc)) return false;
       }
+
+      // price range
       if (typeof f?.minPriceCents === "number" && s.price_cents < f.minPriceCents) return false;
       if (typeof f?.maxPriceCents === "number" && s.price_cents > f.maxPriceCents) return false;
 
-      if (f?.locationText) {
-        const city = (s.artist?.city ?? "").toLowerCase();
+      // location text fallback (city substring)
+      if (f?.locationText && !f?.locationCoords) {
+        const city = (s.artist?.city_label ?? s.artist?.city ?? "").toLowerCase();
         const needle = String(f.locationText).toLowerCase();
         if (needle && city && !city.includes(needle)) return false;
         if (needle && !city) return false;
       }
 
+      // rating (fake)
       if (typeof f?.minRating === "number") {
         if (fakeRating(s.id) < f.minRating) return false;
+      }
+
+      // ✅ distance filter when coords exist on both sides
+      if (f?.locationCoords && typeof f?.maxDistanceKm === "number") {
+        const aLat = s.artist?.city_lat ?? null;
+        const aLng = s.artist?.city_lng ?? null;
+        if (typeof aLat !== "number" || typeof aLng !== "number") return false;
+
+        const km = distanceKm(
+          { lat: f.locationCoords.lat, lng: f.locationCoords.lng },
+          { lat: aLat, lng: aLng }
+        );
+
+        if (km > f.maxDistanceKm) return false;
       }
 
       return true;
@@ -173,15 +179,25 @@ export default function MarketplaceScreen({
                 const metaLine = bulletMetaFromService(s);
                 const avatarUrl = avatarPublicUrl(s.artist?.avatar_url);
 
+                // ✅ compute distance label (only when searching by coords)
+                let distLabel: string | null = null;
+                if (effectiveFilters?.locationCoords) {
+                  const aLat = s.artist?.city_lat ?? null;
+                  const aLng = s.artist?.city_lng ?? null;
+                  if (typeof aLat === "number" && typeof aLng === "number") {
+                    const km = distanceKm(
+                      { lat: effectiveFilters.locationCoords.lat, lng: effectiveFilters.locationCoords.lng },
+                      { lat: aLat, lng: aLng }
+                    );
+                    distLabel = `${Math.round(km)} km`;
+                  }
+                }
+
                 return (
-                  <Pressable
-                    key={s.id}
-                    style={styles.card}
-                    onPress={() => onOpenArtist(s.artist_id, s.id)}
-                  >
+                  <Pressable key={s.id} style={styles.card} onPress={() => onOpenArtist(s.artist_id, s.id)}>
                     <View style={styles.cardImageWrap}>
                       {avatarUrl ? (
-                      <ExpoImage
+                        <ExpoImage
                           source={{ uri: `${avatarUrl}?v=${Date.now()}` }}
                           style={styles.cardImage}
                           contentFit="cover"
@@ -189,16 +205,18 @@ export default function MarketplaceScreen({
                           transition={0}
                           placeholder={{ blurhash: "L5H2EC=PM+yV0g-mq.wG9c010J}I" }}
                         />
-
                       ) : (
                         <View style={styles.cardImageFallback} />
                       )}
                     </View>
 
                     <View style={styles.cardRight}>
-                      <Text style={styles.cardName} numberOfLines={1}>
-                        {displayName}
-                      </Text>
+                      <View style={styles.nameRow}>
+                        <Text style={styles.cardName} numberOfLines={1}>
+                          {displayName}
+                        </Text>
+                        {!!distLabel && <Text style={styles.dist}>{distLabel}</Text>}
+                      </View>
 
                       {!!metaLine && (
                         <Text style={styles.cardMeta} numberOfLines={2}>
@@ -243,22 +261,22 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   list: { gap: 14, paddingTop: 10, paddingBottom: 10 },
 
-  card: {
-    height: CARD_HEIGHT,
-    backgroundColor: PINK_CARD,
-    borderRadius: CARD_RADIUS,
-    flexDirection: "row",
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-
   title: {
     fontSize: 22,
     fontWeight: "900",
     color: BLACK,
     marginBottom: 10,
     paddingHorizontal: 4,
+  },
+
+  card: {
+    height: CARD_HEIGHT,
+    backgroundColor: "#F6D6D6",
+    borderRadius: CARD_RADIUS,
+    flexDirection: "row",
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
   },
 
   cardImageWrap: {
@@ -278,11 +296,21 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
 
+  nameRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+
   cardName: {
+    flex: 1,
     fontSize: 15,
     fontWeight: "900",
     color: BLACK,
   },
+
+  dist: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "rgba(0,0,0,0.55)",
+  },
+
   cardMeta: {
     marginTop: 6,
     fontSize: 12,

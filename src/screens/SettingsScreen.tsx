@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Alert,
   Switch,
+  TextInput,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
@@ -21,10 +22,25 @@ const OFF_WHITE = "#FFFFFF";
 const MUTED = "rgba(0,0,0,0.60)";
 const BORDER = "rgba(0,0,0,0.12)";
 
+type ConsultationType = "zoom" | "google_meet";
+
 export default function SettingsScreen({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
+  // existing
   const [autoCleanup, setAutoCleanup] = useState(false);
+
+  // ✅ artist role
+  const [role, setRole] = useState<string>("client");
+
+  // ✅ consultation settings
+  const [consultEnabled, setConsultEnabled] = useState(false);
+  const [consultType, setConsultType] = useState<ConsultationType>("zoom");
+  const [consultLink, setConsultLink] = useState("");
+  const [consultDirty, setConsultDirty] = useState(false);
+
+  const isArtist = useMemo(() => role === "artist", [role]);
 
   const load = async () => {
     try {
@@ -34,13 +50,23 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
 
       const { data, error } = await supabase
         .from("profiles")
-        .select("auto_cleanup_bookings")
+        .select("role, auto_cleanup_bookings, consultation_enabled, consultation_type, consultation_link")
         .eq("id", auth.user.id)
         .single();
 
       if (error) throw error;
 
+      setRole((data?.role ?? "client") as string);
+
       setAutoCleanup(!!data?.auto_cleanup_bookings);
+
+      setConsultEnabled(!!data?.consultation_enabled);
+
+      const ct = (data?.consultation_type ?? "zoom") as any;
+      setConsultType(ct === "google_meet" ? "google_meet" : "zoom");
+
+      setConsultLink((data?.consultation_link ?? "") as string);
+      setConsultDirty(false);
     } catch (e: any) {
       Alert.alert("Error", e.message);
     } finally {
@@ -48,20 +74,15 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const save = async (value: boolean) => {
+  const saveProfilePatch = async (patch: Record<string, any>) => {
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) throw new Error("Not signed in");
 
-    const { error } = await supabase
-      .from("profiles")
-      .update({ auto_cleanup_bookings: value })
-      .eq("id", auth.user.id);
-
+    const { error } = await supabase.from("profiles").update(patch).eq("id", auth.user.id);
     if (error) throw error;
   };
 
-  const onToggle = (nextValue: boolean) => {
-    // If turning ON, warn first
+  const onToggleAutoCleanup = (nextValue: boolean) => {
     if (!autoCleanup && nextValue) {
       Alert.alert(
         "Enable auto-remove?",
@@ -74,7 +95,7 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
             onPress: async () => {
               try {
                 setSaving(true);
-                await save(true);
+                await saveProfilePatch({ auto_cleanup_bookings: true });
                 setAutoCleanup(true);
               } catch (e: any) {
                 Alert.alert("Save failed", e.message);
@@ -88,11 +109,10 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
       return;
     }
 
-    // Turning OFF (no warning)
     (async () => {
       try {
         setSaving(true);
-        await save(false);
+        await saveProfilePatch({ auto_cleanup_bookings: false });
         setAutoCleanup(false);
       } catch (e: any) {
         Alert.alert("Save failed", e.message);
@@ -102,6 +122,91 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
     })();
   };
 
+  const onToggleConsult = (nextValue: boolean) => {
+    if (!consultEnabled && nextValue) {
+      Alert.alert(
+        "Enable consultations?",
+        "When enabled, clients will see your Zoom/Google Meet link on your profile so they can schedule a consultation before booking.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Enable",
+            style: "default",
+            onPress: async () => {
+              try {
+                setSaving(true);
+                await saveProfilePatch({
+                  consultation_enabled: true,
+                  consultation_type: consultType,
+                  consultation_link: consultLink.trim() || null,
+                });
+                setConsultEnabled(true);
+                setConsultDirty(false);
+              } catch (e: any) {
+                Alert.alert("Save failed", e.message);
+              } finally {
+                setSaving(false);
+              }
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    // turning OFF
+    (async () => {
+      try {
+        setSaving(true);
+        await saveProfilePatch({ consultation_enabled: false });
+        setConsultEnabled(false);
+        setConsultDirty(false);
+      } catch (e: any) {
+        Alert.alert("Save failed", e.message);
+      } finally {
+        setSaving(false);
+      }
+    })();
+  };
+
+  const saveConsultDetails = async () => {
+    try {
+      setSaving(true);
+
+      if (consultEnabled && !consultLink.trim()) {
+        Alert.alert("Missing link", "Please paste your Zoom/Google Meet link.");
+        return;
+      }
+
+      await saveProfilePatch({
+        consultation_type: consultType,
+        consultation_link: consultEnabled ? consultLink.trim() : null,
+      });
+
+      setConsultDirty(false);
+    } catch (e: any) {
+      Alert.alert("Save failed", e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const TypePill = ({ label, value }: { label: string; value: ConsultationType }) => {
+    const on = consultType === value;
+    return (
+      <Pressable
+        onPress={() => {
+          setConsultType(value);
+          setConsultDirty(true);
+        }}
+        style={[styles.typePill, on && styles.typePillOn]}
+        accessibilityRole="button"
+      >
+        <Text style={[styles.typePillText, on && styles.typePillTextOn]}>{label}</Text>
+      </Pressable>
+    );
+  };
+
   useEffect(() => {
     load();
   }, []);
@@ -109,7 +214,7 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
-        {/* Header (match other screens) */}
+        {/* Header */}
         <View style={styles.topBar}>
           <Pressable onPress={onBack} style={styles.iconBtn} accessibilityRole="button">
             <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
@@ -133,23 +238,75 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
             <ActivityIndicator />
           </View>
         ) : (
-          <View style={styles.card}>
-            <Text style={styles.sectionTitle}>Booking history</Text>
-            <Text style={styles.help}>
-              Choose whether cancelled/completed bookings should be removed from your view automatically.
-            </Text>
+          <>
+            {/* Booking history */}
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>Booking history</Text>
+              <Text style={styles.help}>
+                Choose whether cancelled/completed bookings should be removed from your view automatically.
+              </Text>
 
-            <View style={styles.settingRow}>
-              <View style={{ flex: 1, paddingRight: 12 }}>
-                <Text style={styles.rowTitle}>Auto-remove after 24 hours</Text>
-                <Text style={styles.rowSub}>Applies only to your view (the other person may still see it).</Text>
+              <View style={styles.settingRow}>
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={styles.rowTitle}>Auto-remove after 24 hours</Text>
+                  <Text style={styles.rowSub}>Applies only to your view (the other person may still see it).</Text>
+                </View>
+
+                <Switch value={autoCleanup} onValueChange={onToggleAutoCleanup} disabled={saving} />
               </View>
 
-              <Switch value={autoCleanup} onValueChange={onToggle} disabled={saving} />
+              {saving && <Text style={styles.savingText}>Saving…</Text>}
             </View>
 
-            {saving && <Text style={styles.savingText}>Saving…</Text>}
-          </View>
+            {/* ✅ Consultation settings (artists only) */}
+            {isArtist && (
+              <View style={styles.card}>
+                <Text style={styles.sectionTitle}>Consultations</Text>
+                <Text style={styles.help}>
+                  If enabled, clients can use your Zoom/Google Meet link for a quick consultation before booking.
+                </Text>
+
+                <View style={styles.settingRow}>
+                  <View style={{ flex: 1, paddingRight: 12 }}>
+                    <Text style={styles.rowTitle}>Enable consultation link</Text>
+                    <Text style={styles.rowSub}>Shows a consultation button on your public profile.</Text>
+                  </View>
+
+                  <Switch value={consultEnabled} onValueChange={onToggleConsult} disabled={saving} />
+                </View>
+
+                {consultEnabled && (
+                  <>
+                    <View style={styles.typeRow}>
+                      <TypePill label="Zoom" value="zoom" />
+                      <TypePill label="Google Meet" value="google_meet" />
+                    </View>
+
+                    <Text style={styles.label}>Consultation link</Text>
+                    <TextInput
+                      value={consultLink}
+                      onChangeText={(t) => {
+                        setConsultLink(t);
+                        setConsultDirty(true);
+                      }}
+                      style={styles.input}
+                      placeholder="Paste your Zoom or Google Meet link"
+                      autoCapitalize="none"
+                    />
+
+                    <Pressable
+                      onPress={saveConsultDetails}
+                      disabled={saving || !consultDirty}
+                      style={[styles.primaryBtn, (!consultDirty || saving) && { opacity: 0.55 }]}
+                      accessibilityRole="button"
+                    >
+                      <Text style={styles.primaryBtnText}>{saving ? "Saving..." : "Save consultation settings"}</Text>
+                    </Pressable>
+                  </>
+                )}
+              </View>
+            )}
+          </>
         )}
       </View>
     </SafeAreaView>
@@ -219,16 +376,40 @@ const styles = StyleSheet.create({
 
   savingText: { color: MUTED, fontWeight: "800", marginTop: 2 },
 
-  tip: {
-    marginTop: 6,
-    backgroundColor: OFF_WHITE,
-    borderRadius: 16,
-    padding: 12,
+  label: { fontWeight: "900", color: BLACK, marginTop: 6 },
+
+  input: {
     borderWidth: 1,
-    borderColor: BORDER,
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 8,
+    borderColor: "rgba(0,0,0,0.14)",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    backgroundColor: OFF_WHITE,
+    color: BLACK,
+    fontWeight: "800",
+    marginTop: 6,
   },
-  tipText: { flex: 1, color: "rgba(0,0,0,0.75)", fontWeight: "800", lineHeight: 18 },
+
+  typeRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", marginTop: 6 },
+  typePill: {
+    backgroundColor: OFF_WHITE,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.10)",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  typePillOn: { backgroundColor: BLACK, borderColor: BLACK },
+  typePillText: { fontWeight: "900", color: "rgba(0,0,0,0.75)" },
+  typePillTextOn: { color: OFF_WHITE },
+
+  primaryBtn: {
+    marginTop: 10,
+    backgroundColor: BLACK,
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  primaryBtnText: { color: OFF_WHITE, fontWeight: "900" },
 });
+
