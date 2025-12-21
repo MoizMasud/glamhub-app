@@ -13,6 +13,8 @@ import {
   ActivityIndicator,
   Modal,
   TextInput,
+  FlatList,
+  StyleSheet as RNStyleSheet,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
@@ -42,9 +44,6 @@ type ConsultStatus = "" | "requested" | "proposed" | "scheduled" | "declined";
 type StatusFilter = "all" | "pending" | "accepted" | "cancelled" | "completed";
 type SortMode = "soonest" | "newest" | "oldest";
 const PAGE_SIZE = 20;
-
-// ✅ accordion inner scroll max height (tweak if needed)
-const ACCORDION_MAX_HEIGHT = 520;
 
 function normConsultStatus(raw: any): ConsultStatus {
   const v = String(raw ?? "").trim().toLowerCase();
@@ -210,8 +209,11 @@ function PickerSheet(props: {
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
-      <Pressable style={styles.sheetBackdrop} onPress={onCancel}>
-        <Pressable style={styles.sheetCard} onPress={() => {}}>
+      <View style={styles.sheetBackdrop}>
+        {/* backdrop is separate so picker stays responsive */}
+        <Pressable style={RNStyleSheet.absoluteFill} onPress={onCancel} />
+
+        <View style={styles.sheetCard}>
           <View style={styles.sheetHeader}>
             <Text style={styles.sheetTitle}>{title}</Text>
             <Pressable onPress={showCalendarHelp} style={styles.infoIconBtn}>
@@ -240,8 +242,8 @@ function PickerSheet(props: {
               <Text style={styles.primaryBtnText}>Done</Text>
             </Pressable>
           </View>
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -431,6 +433,10 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
 
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 
+  // ✅ modal for "view all bookings" per person (removes nested scroll jank)
+  const [groupModalOpen, setGroupModalOpen] = useState(false);
+  const [groupModalId, setGroupModalId] = useState<string | null>(null);
+
   const [composeId, setComposeId] = useState<string | null>(null);
   const [composeBookingStartIso, setComposeBookingStartIso] = useState<string | null>(null);
   const [composeAllowSameDay, setComposeAllowSameDay] = useState(false);
@@ -439,6 +445,15 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
   const [showDateSheet, setShowDateSheet] = useState(false);
   const [showTimeSheet, setShowTimeSheet] = useState(false);
   const [draftValue, setDraftValue] = useState<Date | null>(null);
+
+  const openGroupModal = (id: string) => {
+    setGroupModalId(id);
+    setGroupModalOpen(true);
+  };
+  const closeGroupModal = () => {
+    setGroupModalOpen(false);
+    setGroupModalId(null);
+  };
 
   const bootstrap = async () => {
     const bootId = ++bootRef.current;
@@ -574,6 +589,14 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
     return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
   }, [pagedBookings, role]);
 
+  const groupModalData = useMemo(() => {
+    if (!groupModalId) return null;
+    const g = groupedBookings.find((x) => x.id === groupModalId);
+    if (!g) return null;
+    const sorted = [...g.items].sort((a, b) => safeTs(a.start_time) - safeTs(b.start_time));
+    return { ...g, items: sorted };
+  }, [groupModalId, groupedBookings]);
+
   const doUpdateStatus = async (id: string, status: BookingStatus) => {
     if (mutatingId) return;
     setMutatingId(id);
@@ -689,27 +712,6 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
     }
     if (!picked || !draftValue) return;
     setDraftValue(applyPickedTime(draftValue, picked));
-  };
-
-  const commitDraft = () => {
-    if (!composeBookingStartIso || !draftValue) return;
-
-    const bookingStart = new Date(composeBookingStartIso);
-    const clamped = snapToMinuteStep(
-      clampConsultationToRules(draftValue, bookingStart, composeAllowSameDay),
-      5
-    );
-
-    setComposeValue(clamped);
-    setDraftValue(clamped);
-    setShowDateSheet(false);
-    setShowTimeSheet(false);
-  };
-
-  const cancelDraft = () => {
-    setDraftValue(composeValue);
-    setShowDateSheet(false);
-    setShowTimeSheet(false);
   };
 
   const sendProposal = async () => {
@@ -885,8 +887,6 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
   }, [searchQuery, statusFilter, artistFilter, sortMode, role, filterDate]);
 
   // ✅ booking card renderer
-  // - moved "remove" into a subtle ⋯ menu (top right) for completed/cancelled bookings
-  // - proposed badge is full-width and wraps safely (no overflow)
   const renderBookingCard = (b: any) => {
     const isPending = b.status === "pending";
     const isAccepted = b.status === "accepted";
@@ -1003,32 +1003,30 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
               </Pressable>
             )}
           </View>
-{consultationRequested && (
-  <View style={styles.hintRow}>
-    <Text style={styles.sectionHintInline}>
-      Booking acceptance does <Text style={{ fontWeight: "900" }}>not</Text> confirm the consultation.
-    </Text>
 
-    {showRemoveInline && (
-      <Pressable
-        disabled={mutatingId === b.id}
-        onPress={() =>
-          Alert.alert("Remove booking?", "This will remove it from your view.", [
-            { text: "Cancel", style: "cancel" },
-            { text: "Remove", style: "destructive", onPress: () => doRemoveForMe(b.id) },
-          ])
-        }
-        style={[styles.deleteInlineBtn, mutatingId === b.id && styles.disabledBtn]}
-        accessibilityLabel="Remove booking"
-      >
-        <Ionicons name="trash-outline" size={16} color={BLACK} />
-      </Pressable>
-    )}
-  </View>
-)}
+          {consultationRequested && (
+            <View style={styles.hintRow}>
+              <Text style={styles.sectionHintInline}>
+                Booking acceptance does <Text style={{ fontWeight: "900" }}>not</Text> confirm the consultation.
+              </Text>
 
-
-
+              {showRemoveInline && (
+                <Pressable
+                  disabled={mutatingId === b.id}
+                  onPress={() =>
+                    Alert.alert("Remove booking?", "This will remove it from your view.", [
+                      { text: "Cancel", style: "cancel" },
+                      { text: "Remove", style: "destructive", onPress: () => doRemoveForMe(b.id) },
+                    ])
+                  }
+                  style={[styles.deleteInlineBtn, mutatingId === b.id && styles.disabledBtn]}
+                  accessibilityLabel="Remove booking"
+                >
+                  <Ionicons name="trash-outline" size={16} color={BLACK} />
+                </Pressable>
+              )}
+            </View>
+          )}
         </View>
 
         {/* CONSULTATION */}
@@ -1189,11 +1187,7 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
           <TextInput
             value={searchQuery}
             onChangeText={setSearchQuery}
-            placeholder={
-              role === "artist"
-                ? "Search"
-                : "Search"
-            }
+            placeholder="Search"
             placeholderTextColor="rgba(0,0,0,0.35)"
             style={styles.searchInput}
             autoCapitalize="none"
@@ -1271,8 +1265,10 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
             {groupedBookings.map((g) => {
               const open = !!expandedGroups[g.id];
 
-              const nextItem = [...g.items].sort((a, b) => safeTs(a.start_time) - safeTs(b.start_time))[0];
+              const sortedBySoonest = [...g.items].sort((a, b) => safeTs(a.start_time) - safeTs(b.start_time));
+              const nextItem = sortedBySoonest[0];
               const nextWhen = nextItem?.start_time ? formatIsoPretty(nextItem.start_time) : null;
+              const remainingCount = Math.max(0, g.items.length - 1);
 
               return (
                 <View key={g.id} style={styles.groupWrap}>
@@ -1299,16 +1295,26 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
 
                   {open && (
                     <View style={styles.groupBody}>
-                      <ScrollView
-                        style={{ maxHeight: ACCORDION_MAX_HEIGHT }}
-                        contentContainerStyle={{ gap: 12, paddingBottom: 12 }}
-                        showsVerticalScrollIndicator={true}
-                        nestedScrollEnabled
-                      >
-                        {g.items.map((b: any) => (
-                          <View key={b.id}>{renderBookingCard(b)}</View>
-                        ))}
-                      </ScrollView>
+                      {/* ✅ show ONLY the next booking card (no nested scroll) */}
+                      {!!nextItem && <View style={{ marginTop: 2 }}>{renderBookingCard(nextItem)}</View>}
+
+                      {/* ✅ if more exist, open modal for full list */}
+                      {remainingCount > 0 && (
+                        <Pressable onPress={() => openGroupModal(g.id)} style={styles.viewAllRow}>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                            <View style={styles.viewAllIcon}>
+                              <Ionicons name="layers-outline" size={16} color={BLACK} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.viewAllTitle}>View all bookings</Text>
+                              <Text style={styles.viewAllSub}>
+                                +{remainingCount} more booking{remainingCount === 1 ? "" : "s"}
+                              </Text>
+                            </View>
+                          </View>
+                          <Ionicons name="chevron-forward" size={18} color="rgba(0,0,0,0.65)" />
+                        </Pressable>
+                      )}
                     </View>
                   )}
                 </View>
@@ -1328,10 +1334,44 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
         )}
       </View>
 
-      {/* Filters Modal */}
+      {/* ✅ Group "View all" Modal (fixed: backdrop does NOT steal scroll) */}
+      <Modal visible={groupModalOpen} transparent animationType="fade" onRequestClose={closeGroupModal}>
+        <View style={styles.modalBackdropFull}>
+          <Pressable style={RNStyleSheet.absoluteFill} onPress={closeGroupModal} />
+
+          {/* Card is NOT a Pressable so FlatList scroll is buttery */}
+          <View style={styles.groupModalCard}>
+            <View style={styles.groupModalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.groupModalTitle}>{groupModalData?.label ?? "Bookings"}</Text>
+                <Text style={styles.groupModalSub}>
+                  {groupModalData?.items?.length ?? 0} booking{(groupModalData?.items?.length ?? 0) === 1 ? "" : "s"}
+                </Text>
+              </View>
+
+              <Pressable onPress={closeGroupModal} style={styles.iconBtn} accessibilityLabel="Close">
+                <Ionicons name="close" size={18} color="rgba(0,0,0,0.75)" />
+              </Pressable>
+            </View>
+
+            <FlatList
+              data={groupModalData?.items ?? []}
+              keyExtractor={(item: any) => String(item.id)}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={{ paddingBottom: 14, gap: 12 }}
+              renderItem={({ item }) => <View>{renderBookingCard(item)}</View>}
+            />
+          </View>
+        </View>
+      </Modal>
+
+      {/* ✅ Filters Modal (fixed: backdrop does NOT steal scroll/taps) */}
       <Modal visible={filtersOpen} transparent animationType="fade" onRequestClose={() => setFiltersOpen(false)}>
-        <Pressable style={styles.modalBackdrop} onPress={() => setFiltersOpen(false)}>
-          <Pressable style={styles.modalCard} onPress={() => {}}>
+        <View style={styles.modalBackdrop}>
+          <Pressable style={RNStyleSheet.absoluteFill} onPress={() => setFiltersOpen(false)} />
+
+          <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Filters</Text>
               <Pressable onPress={() => setFiltersOpen(false)} style={styles.iconBtn} accessibilityLabel="Close filters">
@@ -1474,26 +1514,18 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
                 <Text style={styles.modalPrimaryText}>Done</Text>
               </Pressable>
             </View>
-          </Pressable>
-        </Pressable>
+          </View>
+        </View>
       </Modal>
 
       {/* Android pickers (consultation) */}
       {Platform.OS !== "ios" && showDateSheet && draftValue && (
-        <DateTimePicker
-          value={draftValue}
-          mode="date"
-          display="calendar"
-          onChange={onAndroidDateChange}
-        />
+        <DateTimePicker value={draftValue} mode="date" display="calendar" onChange={onAndroidDateChange} />
       )}
       {Platform.OS !== "ios" && showTimeSheet && draftValue && (
-       <DateTimePicker
-          value={draftValue}
-          mode="time"
-          display="spinner"
-          onChange={onAndroidTimeChange}
-        />)}
+        <DateTimePicker value={draftValue} mode="time" display="spinner" onChange={onAndroidTimeChange} />
+      )}
+
       {/* Android picker (filters date) */}
       {Platform.OS !== "ios" && showAndroidFilterDate && (
         <DateTimePicker value={filterDateDraft} mode="date" display="calendar" onChange={onAndroidFilterDateChange} />
@@ -1628,9 +1660,6 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.06)",
   },
 
-  tipText: { marginTop: 8, color: "rgba(0,0,0,0.50)", fontWeight: "700", fontSize: 12 },
-  tipStrong: { fontWeight: "900", color: BLACK },
-
   pillsScroll: { marginTop: 10, maxHeight: 44 },
   pillsRow: { flexDirection: "row", gap: 10, paddingVertical: 2, alignItems: "center" },
 
@@ -1652,7 +1681,6 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.08)",
     backgroundColor: "rgba(0,0,0,0.04)",
   },
-
 
   activePill: {
     flexDirection: "row",
@@ -1732,13 +1760,34 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: "rgba(0,0,0,0.06)",
     paddingTop: 10,
+    gap: 10,
   },
 
-  bookingCard: {
-    borderRadius: 18,
+  viewAllRow: {
+    marginTop: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.06)",
     backgroundColor: OFF_WHITE,
-    gap: 12
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
+  viewAllIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: PINK,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  viewAllTitle: { fontWeight: "900", color: BLACK },
+  viewAllSub: { marginTop: 4, fontWeight: "800", color: "rgba(0,0,0,0.55)", fontSize: 12 },
+
+  bookingCard: { borderRadius: 18, backgroundColor: OFF_WHITE, gap: 12 },
 
   sectionCard: {
     backgroundColor: CARD_BG,
@@ -1750,7 +1799,6 @@ const styles = StyleSheet.create({
   sectionTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   sectionTitle: { fontWeight: "900", color: BLACK },
 
-  // ✅ right side of booking header: status pill + overflow menu
   sectionRightRow: { flexDirection: "row", alignItems: "center", gap: 10 },
 
   sectionPill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6, alignSelf: "flex-start" },
@@ -1761,9 +1809,6 @@ const styles = StyleSheet.create({
   dateText: { fontSize: 15, fontWeight: "900", color: BLACK },
   timeText: { marginTop: 3, fontSize: 13, fontWeight: "800", color: "rgba(0,0,0,0.72)" },
 
-  sectionHint: { marginTop: 10, color: "rgba(0,0,0,0.55)", fontWeight: "800", fontSize: 12 },
-
-  // ✅ proposed badge now stretches and wraps (no overflow)
   proposedBadge: {
     flexDirection: "row",
     alignItems: "flex-start",
@@ -1775,14 +1820,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     alignSelf: "stretch",
   },
-  proposedBadgeText: {
-    flex: 1,
-    fontWeight: "900",
-    fontSize: 12,
-    color: BLACK,
-    flexWrap: "wrap",
-    lineHeight: 16,
-  },
+  proposedBadgeText: { flex: 1, fontWeight: "900", fontSize: 12, color: BLACK, flexWrap: "wrap", lineHeight: 16 },
 
   waitingText: { marginTop: 10, color: MUTED, fontWeight: "800", fontSize: 12 },
 
@@ -1846,17 +1884,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   secondaryBtnText: { color: BLACK, fontWeight: "900" },
-
-  iconActionBtnSmall: {
-    width: 38,
-    height: 38,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: BORDER,
-    backgroundColor: OFF_WHITE,
-  },
 
   disabledBtn: { opacity: 0.55 },
 
@@ -1966,5 +1993,28 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   modalPrimaryText: { fontWeight: "900", color: OFF_WHITE },
-});
 
+  modalBackdropFull: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "flex-end",
+    padding: 12,
+  },
+  groupModalCard: {
+    backgroundColor: OFF_WHITE,
+    borderRadius: 22,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    maxHeight: "88%",
+  },
+  groupModalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginBottom: 10,
+  },
+  groupModalTitle: { fontSize: 16, fontWeight: "900", color: BLACK },
+  groupModalSub: { marginTop: 4, fontWeight: "800", color: "rgba(0,0,0,0.55)", fontSize: 12 },
+});
