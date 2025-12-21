@@ -1,5 +1,5 @@
 // BookingSelectedScreen.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -16,6 +16,8 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
+import DateTimePickerModal from "react-native-modal-datetime-picker";
+
 import { supabase } from "../lib/supabase";
 import { getServiceDetails, MarketplaceService } from "../lib/services";
 import { createBooking } from "../lib/bookings";
@@ -43,10 +45,6 @@ async function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promi
   }
 }
 
-function addMinutes(d: Date, minutes: number) {
-  return new Date(d.getTime() + minutes * 60 * 1000);
-}
-
 function startOfDay(d: Date) {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
@@ -60,11 +58,7 @@ function endOfDay(d: Date) {
 }
 
 function sameDay(a: Date, b: Date) {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  );
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
 function clampToFuture(d: Date) {
@@ -73,7 +67,7 @@ function clampToFuture(d: Date) {
 }
 
 function formatDatePretty(d: Date) {
-  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 }
 
 function formatTimePretty(d: Date) {
@@ -84,8 +78,11 @@ function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
 
-// ✅ No native time picker on iOS.
-// Build a stable list of times (every 15 minutes by default).
+function toYMD(d: Date) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+// iOS stable time list (every 15 min)
 function buildTimeOptions(stepMinutes = 15) {
   const out: { label: string; h: number; m: number }[] = [];
   for (let h = 0; h < 24; h++) {
@@ -96,6 +93,104 @@ function buildTimeOptions(stepMinutes = 15) {
     }
   }
   return out;
+}
+
+/** ---------------------------
+ * Availability (time-based)
+ * --------------------------*/
+type BusyInterval = { start: Date; end: Date };
+
+function overlaps(a: BusyInterval, b: BusyInterval) {
+  return a.start.getTime() < b.end.getTime() && b.start.getTime() < a.end.getTime();
+}
+
+function dayBounds(d: Date) {
+  const start = startOfDay(d);
+  const end = endOfDay(d);
+  return { start, end };
+}
+
+async function fetchBusyIntervals(args: { artistId: string; day: Date }): Promise<BusyInterval[]> {
+  const { artistId, day } = args;
+  const { start, end } = dayBounds(day);
+
+  const { data: bookings, error: bErr } = await supabase
+    .from("bookings")
+    .select("start_time, end_time")
+    .eq("artist_id", artistId)
+    .in("status", ["pending", "accepted"])
+    .lt("start_time", end.toISOString())
+    .gt("end_time", start.toISOString());
+
+  if (bErr) throw bErr;
+
+  const { data: off, error: oErr } = await supabase
+    .from("artist_time_off")
+    .select("start_time, end_time, all_day")
+    .eq("artist_id", artistId)
+    .lt("start_time", end.toISOString())
+    .gt("end_time", start.toISOString());
+
+  if (oErr) throw oErr;
+
+  const intervals: BusyInterval[] = [];
+
+  for (const r of bookings ?? []) {
+    const s = new Date((r as any).start_time);
+    const e = new Date((r as any).end_time);
+    if (!isNaN(s.getTime()) && !isNaN(e.getTime())) intervals.push({ start: s, end: e });
+  }
+
+  for (const r of off ?? []) {
+    const s = new Date((r as any).start_time);
+    const e = new Date((r as any).end_time);
+    if (!isNaN(s.getTime()) || !isNaN(e.getTime())) intervals.push({ start: s, end: e });
+  }
+
+  intervals.sort((a, b) => a.start.getTime() - b.start.getTime());
+  return intervals;
+}
+
+/** ---------------------------
+ * Proper day blocking (ALL-DAY time off)
+ * We reject blocked days on date confirm (clean UX + year selection)
+ * --------------------------*/
+async function fetchAllDayTimeOffDays(args: { artistId: string; rangeStart: Date; rangeEnd: Date }): Promise<Set<string>> {
+  const { artistId, rangeStart, rangeEnd } = args;
+
+  const { data, error } = await supabase
+    .from("artist_time_off")
+    .select("start_time, end_time, all_day")
+    .eq("artist_id", artistId)
+    .eq("all_day", true)
+    .lt("start_time", rangeEnd.toISOString())
+    .gt("end_time", rangeStart.toISOString());
+
+  if (error) throw error;
+
+  const disabled = new Set<string>();
+
+  for (const r of (data ?? []) as any[]) {
+    const s = new Date(r.start_time);
+    const e = new Date(r.end_time);
+    if (isNaN(s.getTime()) || isNaN(e.getTime())) continue;
+
+    // mark each date in the span
+    let cursor = startOfDay(s);
+    const last = startOfDay(e);
+    while (cursor.getTime() <= last.getTime()) {
+      disabled.add(toYMD(cursor));
+      cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+    }
+  }
+
+  return disabled;
+}
+
+function humanWhen(iso: string) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "Unknown time";
+  return `${formatDatePretty(d)} at ${formatTimePretty(d)}`;
 }
 
 export default function BookingSelectedScreen({
@@ -115,112 +210,49 @@ export default function BookingSelectedScreen({
   const [services, setServices] = useState<MarketplaceService[]>([]);
   const [errorText, setErrorText] = useState<string | null>(null);
 
-  // booking datetime
   const [selectedDateTime, setSelectedDateTime] = useState<Date | null>(null);
 
-  // consultation
-  const [consultationEnabled, setConsultationEnabled] = useState(false);
-  const [sameDayConsultation, setSameDayConsultation] = useState(false);
+  const [busyIntervals, setBusyIntervals] = useState<BusyInterval[]>([]);
+  const [disabledTimes, setDisabledTimes] = useState<Set<string>>(new Set());
+  const [busyLoading, setBusyLoading] = useState(false);
+
+  // ✅ blocked ALL-DAY dates
+  const [blockedDaysLoading, setBlockedDaysLoading] = useState(false);
+  const [blockedDays, setBlockedDays] = useState<Set<string>>(new Set());
+
+  // Date picker modal (clean + year jump)
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+
+  // Android time picker / iOS time list
+  const [showAndroidTime, setShowAndroidTime] = useState(false);
+  const [iosTimeOpen, setIosTimeOpen] = useState(false);
+
+  // Optional consult (kept lightweight)
   const [wantsConsultation, setWantsConsultation] = useState(false);
   const [consultDateTime, setConsultDateTime] = useState<Date | null>(null);
   const [consultNote, setConsultNote] = useState("");
 
   const [agreeTerms, setAgreeTerms] = useState(false);
-  const [joinChannel, setJoinChannel] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
-  // Android native pickers
-  const [showAndroidDate, setShowAndroidDate] = useState(false);
-  const [showAndroidTime, setShowAndroidTime] = useState(false);
-  const [showAndroidConsultDate, setShowAndroidConsultDate] = useState(false);
-  const [showAndroidConsultTime, setShowAndroidConsultTime] = useState(false);
+  const totalCents = useMemo(() => services.reduce((sum, s) => sum + (s?.price_cents ?? 0), 0), [services]);
+  const totalDuration = useMemo(() => services.reduce((sum, s) => sum + (s?.duration_minutes ?? 0), 0), [services]);
+  const timeOptions = useMemo(() => buildTimeOptions(15), []);
 
-  // iOS time selection modal (stable)
-  const [iosTimeOpen, setIosTimeOpen] = useState(false);
-  const [iosConsultTimeOpen, setIosConsultTimeOpen] = useState(false);
-
-  // iOS date modal (inline date picker) — this one is stable
-  const [iosDateOpen, setIosDateOpen] = useState(false);
-  const [iosConsultDateOpen, setIosConsultDateOpen] = useState(false);
-
-  const totalCents = useMemo(
-    () => services.reduce((sum, s) => sum + (s?.price_cents ?? 0), 0),
-    [services]
-  );
-  const totalDuration = useMemo(
-    () => services.reduce((sum, s) => sum + (s?.duration_minutes ?? 0), 0),
-    [services]
-  );
+  const minDate = useMemo(() => new Date(), []);
+  const maxDate = useMemo(() => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() + 5);
+    return d;
+  }, []);
 
   const canConfirm =
     services.length > 0 &&
     !!selectedDateTime &&
     agreeTerms &&
     !confirming &&
+    !busyLoading &&
     (!wantsConsultation || !!consultDateTime);
-
-  const minDate = useMemo(() => new Date(), []);
-  const maxDate = useMemo(() => addMinutes(startOfDay(new Date()), 14 * 24 * 60), []);
-
-  const timeOptions = useMemo(() => buildTimeOptions(15), []);
-
-  // ---- Consultation constraints (core fix) ----
-  const consultMaxDate = useMemo(() => {
-    // If no booking chosen yet, fall back to normal max range
-    if (!selectedDateTime) return maxDate;
-
-    // If same-day consult allowed: you can pick the same DATE as booking
-    if (sameDayConsultation) return endOfDay(selectedDateTime);
-
-    // Otherwise: only days strictly BEFORE booking day
-    const dayBefore = addMinutes(startOfDay(selectedDateTime), -1); // 23:59 of previous day
-    return dayBefore;
-  }, [selectedDateTime, sameDayConsultation, maxDate]);
-
-  const isConsultBeforeBooking = (candidate: Date) => {
-    if (!selectedDateTime) return true;
-
-    // must be strictly before booking datetime
-    if (candidate.getTime() >= selectedDateTime.getTime()) return false;
-
-    // if same-day not allowed, also enforce date strictly before
-    if (!sameDayConsultation && sameDay(candidate, selectedDateTime)) return false;
-
-    return true;
-  };
-
-  const ensureConsultValid = (candidate: Date | null) => {
-    if (!candidate) return null;
-
-    // always keep in the future
-    let next = clampToFuture(candidate);
-
-    // if booking exists, enforce "before booking" rules
-    if (selectedDateTime && !isConsultBeforeBooking(next)) {
-      // best auto-fix:
-      // - if same-day allowed: set to 15 minutes before booking (or now if booking is too soon)
-      // - if not allowed: set to end of previous day (or null if that's not in the future)
-      if (sameDayConsultation) {
-        const fallback = addMinutes(selectedDateTime, -15);
-        next = clampToFuture(fallback);
-        if (!isConsultBeforeBooking(next)) return null;
-      } else {
-        const prevDayEnd = addMinutes(startOfDay(selectedDateTime), -1); // 23:59 previous day
-        // if that is not in the future, there is no valid consult slot
-        if (prevDayEnd.getTime() <= new Date().getTime()) return null;
-        next = prevDayEnd;
-      }
-    }
-
-    return next;
-  };
-
-  // If booking changes, make sure existing consult selection still valid
-  useEffect(() => {
-    if (!wantsConsultation) return;
-    setConsultDateTime((prev) => ensureConsultValid(prev));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDateTime, sameDayConsultation, wantsConsultation]);
 
   const load = async () => {
     try {
@@ -233,24 +265,6 @@ export default function BookingSelectedScreen({
         full.push(s);
       }
       setServices(full);
-
-      // ✅ add same_day_consultation fetch
-      const { data: prof, error: profErr } = await supabase
-        .from("profiles")
-        .select("consultation_enabled, allow_same_day_consultation")
-        .eq("id", artistId)
-        .single();
-
-      if (profErr) throw profErr;
-
-      setConsultationEnabled(!!prof?.consultation_enabled);
-      setSameDayConsultation(!!prof?.allow_same_day_consultation)
-
-      if (!prof?.consultation_enabled) {
-        setWantsConsultation(false);
-        setConsultDateTime(null);
-        setConsultNote("");
-      }
     } catch (e: any) {
       setServices([]);
       setErrorText(e?.message ?? "Failed to load selected services.");
@@ -259,47 +273,113 @@ export default function BookingSelectedScreen({
     }
   };
 
+  // preload blocked days for next 5 years (usually small dataset)
+  const loadBlockedDays = useCallback(async () => {
+    try {
+      setBlockedDaysLoading(true);
+      const rangeStart = startOfDay(new Date());
+      const rangeEnd = endOfDay(maxDate);
+      const set = await fetchAllDayTimeOffDays({ artistId, rangeStart, rangeEnd });
+      setBlockedDays(set);
+    } catch (e) {
+      // fail open: don’t block booking if we can’t fetch
+      console.warn("Failed to load blocked days", e);
+      setBlockedDays(new Set());
+    } finally {
+      setBlockedDaysLoading(false);
+    }
+  }, [artistId, maxDate]);
+
   useEffect(() => {
     load();
+    loadBlockedDays();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artistId, serviceIds.join("|")]);
 
-  // -------- Openers --------
+  const computeDisabledTimes = useCallback(
+    async (day: Date) => {
+      if (!totalDuration || totalDuration <= 0) {
+        setBusyIntervals([]);
+        setDisabledTimes(new Set());
+        return;
+      }
+
+      try {
+        setBusyLoading(true);
+
+        const intervals = await fetchBusyIntervals({ artistId, day });
+        setBusyIntervals(intervals);
+
+        const disabled = new Set<string>();
+        const now = new Date();
+
+        for (const t of timeOptions) {
+          const start = new Date(day);
+          start.setHours(t.h, t.m, 0, 0);
+
+          // past times for today
+          if (sameDay(day, now) && start.getTime() < now.getTime()) {
+            disabled.add(`${t.h}:${t.m}`);
+            continue;
+          }
+
+          const end = new Date(start.getTime() + totalDuration * 60_000);
+
+          // prevent cross-midnight booking blocks
+          if (!sameDay(start, end)) {
+            disabled.add(`${t.h}:${t.m}`);
+            continue;
+          }
+
+          if (intervals.some((b) => overlaps(b, { start, end }))) {
+            disabled.add(`${t.h}:${t.m}`);
+          }
+        }
+
+        setDisabledTimes(disabled);
+
+        // if currently selected time becomes invalid, clear it
+        setSelectedDateTime((prev) => {
+          if (!prev) return prev;
+          if (!sameDay(prev, day)) return prev;
+          const key = `${prev.getHours()}:${prev.getMinutes()}`;
+          if (disabled.has(key)) return null;
+          return prev;
+        });
+      } catch (e) {
+        console.warn("Failed to load availability", e);
+        setBusyIntervals([]);
+        setDisabledTimes(new Set());
+      } finally {
+        setBusyLoading(false);
+      }
+    },
+    [artistId, timeOptions, totalDuration]
+  );
+
+  useEffect(() => {
+    if (!selectedDateTime) return;
+    computeDisabledTimes(selectedDateTime);
+  }, [selectedDateTime ? selectedDateTime.toDateString() : "", computeDisabledTimes]);
+
   const openBookingDate = () => {
     setSelectedDateTime((prev) => prev ?? clampToFuture(new Date()));
-    if (Platform.OS === "ios") setIosDateOpen(true);
-    else setShowAndroidDate(true);
+    setDatePickerOpen(true);
   };
 
   const openBookingTime = () => {
-    setSelectedDateTime((prev) => prev ?? clampToFuture(new Date()));
+    if (!selectedDateTime) {
+      Alert.alert("Pick a date first", "Choose a booking date before selecting a time.");
+      return;
+    }
     if (Platform.OS === "ios") setIosTimeOpen(true);
     else setShowAndroidTime(true);
   };
 
-  const openConsultDate = () => {
-    setConsultDateTime((prev) => ensureConsultValid(prev ?? clampToFuture(new Date())));
-    if (Platform.OS === "ios") setIosConsultDateOpen(true);
-    else setShowAndroidConsultDate(true);
-  };
-
-  const openConsultTime = () => {
-    setConsultDateTime((prev) => ensureConsultValid(prev ?? clampToFuture(new Date())));
-    if (Platform.OS === "ios") setIosConsultTimeOpen(true);
-    else setShowAndroidConsultTime(true);
-  };
-
-  // -------- Android handlers --------
-  const onChangeBookingDateAndroid = (event: DateTimePickerEvent, date?: Date) => {
-    setShowAndroidDate(false);
-    if (event.type === "dismissed" || !date) return;
-
-    setSelectedDateTime((prev) => {
-      const base = prev ?? clampToFuture(new Date());
-      const next = new Date(base);
-      next.setFullYear(date.getFullYear(), date.getMonth(), date.getDate());
-      return clampToFuture(next);
-    });
+  const isTimeDisabled = (day: Date, h: number, m: number) => {
+    if (!selectedDateTime) return false;
+    if (!sameDay(day, selectedDateTime)) return false;
+    return disabledTimes.has(`${h}:${m}`);
   };
 
   const onChangeBookingTimeAndroid = (event: DateTimePickerEvent, date?: Date) => {
@@ -310,86 +390,100 @@ export default function BookingSelectedScreen({
       const base = prev ?? clampToFuture(new Date());
       const next = new Date(base);
       next.setHours(date.getHours(), date.getMinutes(), 0, 0);
-      return clampToFuture(next);
-    });
-  };
+      const fixed = clampToFuture(next);
 
-  const onChangeConsultDateAndroid = (event: DateTimePickerEvent, date?: Date) => {
-    setShowAndroidConsultDate(false);
-    if (event.type === "dismissed" || !date) return;
+      if (isTimeDisabled(base, fixed.getHours(), fixed.getMinutes())) {
+        Alert.alert("Unavailable", "That time is already booked or the artist is unavailable.");
+        return prev;
+      }
 
-    setConsultDateTime((prev) => {
-      const base = prev ?? clampToFuture(new Date());
-      const next = new Date(base);
-      next.setFullYear(date.getFullYear(), date.getMonth(), date.getDate());
-      // keep time from base
-      const fixed = ensureConsultValid(next);
       return fixed;
     });
   };
 
-  const onChangeConsultTimeAndroid = (event: DateTimePickerEvent, date?: Date) => {
-    setShowAndroidConsultTime(false);
-    if (event.type === "dismissed" || !date) return;
-
-    setConsultDateTime((prev) => {
+  const setBookingTimeIOS = (h: number, m: number) => {
+    setSelectedDateTime((prev) => {
       const base = prev ?? clampToFuture(new Date());
       const next = new Date(base);
-      next.setHours(date.getHours(), date.getMinutes(), 0, 0);
+      next.setHours(h, m, 0, 0);
+      const fixed = clampToFuture(next);
 
-      const fixed = ensureConsultValid(next);
-      if (!fixed) {
-        Alert.alert(
-          "Invalid consultation time",
-          selectedDateTime
-            ? "Consultation must be before the booking time."
-            : "Please choose a valid consultation time."
-        );
-        return prev; // keep previous
+      if (isTimeDisabled(base, h, m)) {
+        Alert.alert("Unavailable", "That time is already booked or the artist is unavailable.");
+        return prev;
       }
       return fixed;
     });
   };
 
-  // -------- iOS time setters (no native picker) --------
-  const setBookingTime = (h: number, m: number) => {
-    setSelectedDateTime((prev) => {
-      const base = prev ?? clampToFuture(new Date());
-      const next = new Date(base);
-      next.setHours(h, m, 0, 0);
-      return clampToFuture(next);
-    });
+  const createAllBookings = async (uid: string) => {
+    if (!selectedDateTime) return;
+
+    let cursor = new Date(selectedDateTime);
+
+    for (const s of services) {
+      const start = new Date(cursor);
+      const end = new Date(start.getTime() + (s.duration_minutes ?? 0) * 60_000);
+
+      await createBooking({
+        serviceId: s.id,
+        artistId: s.artist_id,
+        startTimeISO: start.toISOString(),
+        endTimeISO: end.toISOString(),
+        notes: wantsConsultation ? "Consultation requested" : undefined,
+        consultation_meta:
+          wantsConsultation && consultDateTime
+            ? {
+                wants_consultation: true,
+                availability: [consultDateTime.toISOString()],
+                note: consultNote.trim() ? consultNote.trim() : null, // ✅ null, not undefined
+              }
+            : undefined,
+      });
+
+      cursor = end;
+    }
   };
 
-  const setConsultTime = (h: number, m: number) => {
-    setConsultDateTime((prev) => {
-      const base = prev ?? clampToFuture(new Date());
-      const next = new Date(base);
-      next.setHours(h, m, 0, 0);
-      const fixed = ensureConsultValid(next);
-      return fixed;
-    });
-  };
+  const checkDuplicateServiceAndConfirm = async (uid: string): Promise<boolean> => {
+    // Check if the user already has an active booking for any of these services.
+    // If yes: warn + allow them to proceed (Yes/No).
+    const { data: existing, error } = await supabase
+      .from("bookings")
+      .select("id, service_id, start_time, status")
+      .eq("client_id", uid)
+      .in("service_id", serviceIds)
+      .in("status", ["pending", "accepted"])
+      .order("start_time", { ascending: false })
+      .limit(10);
 
-  // -------- iOS date picker (inline) --------
-  const onChangeIOSBookingDate = (_event: DateTimePickerEvent, date?: Date) => {
-    if (!date || isNaN(date.getTime())) return;
-    setSelectedDateTime((prev) => {
-      const base = prev ?? clampToFuture(new Date());
-      const next = new Date(base);
-      next.setFullYear(date.getFullYear(), date.getMonth(), date.getDate());
-      return clampToFuture(next);
-    });
-  };
+    if (error) throw error;
 
-  const onChangeIOSConsultDate = (_event: DateTimePickerEvent, date?: Date) => {
-    if (!date || isNaN(date.getTime())) return;
-    setConsultDateTime((prev) => {
-      const base = prev ?? clampToFuture(new Date());
-      const next = new Date(base);
-      next.setFullYear(date.getFullYear(), date.getMonth(), date.getDate());
-      const fixed = ensureConsultValid(next);
-      return fixed;
+    if (!existing || existing.length === 0) return true;
+
+    const serviceIdToTitle = new Map<string, string>();
+    for (const s of services) serviceIdToTitle.set(s.id, s.title);
+
+    // Build a clean message
+    const lines = existing.slice(0, 3).map((b: any) => {
+      const title = serviceIdToTitle.get(String(b.service_id)) ?? "This service";
+      const when = b.start_time ? humanWhen(String(b.start_time)) : "Unknown time";
+      return `• ${title} — ${when}`;
+    });
+
+    const more = existing.length > 3 ? `\n\n(+${existing.length - 3} more)` : "";
+
+    return await new Promise<boolean>((resolve) => {
+      Alert.alert(
+        "Book again?",
+        `You already booked this service before.\n\nYou’re about to book the same service again at a different time.\n\nExisting booking(s):\n${lines.join(
+          "\n"
+        )}${more}\n\nDo you want to continue?`,
+        [
+          { text: "No", style: "cancel", onPress: () => resolve(false) },
+          { text: "Yes", style: "default", onPress: () => resolve(true) },
+        ]
+      );
     });
   };
 
@@ -401,6 +495,18 @@ export default function BookingSelectedScreen({
     }
     if (!selectedDateTime) return;
 
+    const ymd = toYMD(selectedDateTime);
+    if (blockedDays.has(ymd)) {
+      Alert.alert("Unavailable day", "This day is booked off by the artist. Please choose another date.");
+      return;
+    }
+
+    const key = `${selectedDateTime.getHours()}:${selectedDateTime.getMinutes()}`;
+    if (disabledTimes.has(key)) {
+      Alert.alert("Time unavailable", "That time was just booked or blocked. Please choose another time.");
+      return;
+    }
+
     const uid = data.user.id;
 
     if (services.some((s) => s.artist_id === uid)) {
@@ -408,97 +514,42 @@ export default function BookingSelectedScreen({
       return;
     }
 
-    if (wantsConsultation) {
-      const fixed = ensureConsultValid(consultDateTime);
-      if (!fixed) {
-        Alert.alert(
-          "Consultation time needed",
-          "Please choose a consultation date/time before the booking time."
-        );
-        return;
-      }
-      if (consultDateTime?.getTime() !== fixed.getTime()) setConsultDateTime(fixed);
-    }
-
     try {
       setConfirming(true);
 
-      const { data: existing, error } = await supabase
-        .from("bookings")
-        .select("id, service_id")
-        .eq("client_id", uid)
-        .in("service_id", serviceIds)
-        .in("status", ["pending", "accepted"])
-        .limit(1);
+      // ✅ NEW behavior:
+      // Instead of hard-blocking duplicate service bookings,
+      // warn the user and let them choose Yes/No.
+      const okToProceed = await checkDuplicateServiceAndConfirm(uid);
+      if (!okToProceed) return;
 
-      if (error) throw error;
-      if ((existing ?? []).length > 0) {
-        Alert.alert("Already booked", "You already have an active booking for one of these services.");
-        return;
-      }
+      await createAllBookings(uid);
 
-      let cursor = new Date(selectedDateTime);
+      Alert.alert("Booked", "Your booking was created successfully.", [{ text: "View booking", onPress: onBooked }]);
+      } catch (e: any) {
+        const msg = String(e?.message ?? "").toLowerCase();
 
-      for (const s of services) {
-        await createBooking({
-          serviceId: s.id,
-          artistId: s.artist_id,
-          startTimeISO: cursor.toISOString(),
-          notes: joinChannel ? "Join channel: yes" : "Join channel: no",
-            consultation_meta:
-              consultationEnabled && wantsConsultation && consultDateTime
-                ? {
-                    wants_consultation: true,
-                    availability: [consultDateTime.toISOString()],
-                    note: consultNote.trim() ? consultNote.trim() : null,
+        // real overlap protection (keep this)
+        if (msg.includes("exclude") || msg.includes("overlap")) {
+          Alert.alert(
+            "Unavailable",
+            "That time is already booked. Please choose another time."
+          );
+          return;
+        }
 
-                    // ✅ If client selected a time, it's a PROPOSAL
-                    consult_status: "proposed",
-                    proposed_time_iso: consultDateTime.toISOString(),
-                    proposed_note: "from_client",
-                  }
-                : null,
-
-        });
-
-        cursor = addMinutes(cursor, s.duration_minutes ?? 0);
-      }
-
-      Alert.alert("Booked ✅", "Your booking was created successfully.", [
-        { text: "View booking", onPress: onBooked },
-      ]);
-    } catch (e: any) {
-      const msg = String(e?.message ?? "");
-      if (msg.toLowerCase().includes("unique")) {
-        Alert.alert("Already booked", "You already have an active booking.");
-      } else {
+        // everything else
         Alert.alert("Error", e?.message ?? "Failed to book.");
+      } finally {
+        setConfirming(false);
       }
-    } finally {
-      setConfirming(false);
-    }
+
+
+
   };
 
   const dateLabel = selectedDateTime ? formatDatePretty(selectedDateTime) : "Choose date";
   const timeLabel = selectedDateTime ? formatTimePretty(selectedDateTime) : "Choose time";
-
-  const consultDateLabel = consultDateTime ? formatDatePretty(consultDateTime) : "Choose consultation date";
-  const consultTimeLabel = consultDateTime ? formatTimePretty(consultDateTime) : "Choose consultation time";
-
-  // Filter consult time options on iOS if consult is on the booking day
-  const filteredConsultTimeOptions = useMemo(() => {
-    if (!consultDateTime || !selectedDateTime) return timeOptions;
-
-    // If consult date is same day as booking date:
-    // - must be strictly before booking time
-    // - if same-day consult not allowed, this date should never happen (we still filter defensively)
-    if (sameDay(consultDateTime, selectedDateTime)) {
-      const bookingMinutes = selectedDateTime.getHours() * 60 + selectedDateTime.getMinutes();
-      return timeOptions.filter((t) => t.h * 60 + t.m < bookingMinutes);
-    }
-
-    return timeOptions;
-  }, [consultDateTime, selectedDateTime, timeOptions]);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -553,6 +604,12 @@ export default function BookingSelectedScreen({
                 <Text style={styles.pickerText}>{dateLabel}</Text>
                 <Ionicons name="calendar-outline" size={18} color={"rgba(0,0,0,0.65)"} />
               </Pressable>
+
+              <Text style={styles.availHint}>
+                {blockedDaysLoading
+                  ? "Loading booked-off dates…"
+                  : "If you see an “Unavailable” alert, that date is booked off by the artist. Pick another day."}
+              </Text>
             </View>
 
             {/* Time */}
@@ -561,104 +618,108 @@ export default function BookingSelectedScreen({
                 <Text style={styles.pickerText}>{timeLabel}</Text>
                 <Ionicons name="time-outline" size={18} color={"rgba(0,0,0,0.65)"} />
               </Pressable>
+
+              {!!selectedDateTime && (
+                <View style={{ marginTop: 8 }}>
+                  {busyLoading ? (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <ActivityIndicator />
+                      <Text style={styles.availHint}>Loading available times…</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.availHint}>
+                      {busyIntervals.length > 0 ? "Some times are unavailable." : "No conflicts found — all times should be available."}
+                    </Text>
+                  )}
+                </View>
+              )}
             </View>
 
-            {/* Consultation */}
-            {consultationEnabled && (
-              <View style={[styles.summaryCard, { marginTop: 12 }]}>
-                <Pressable
-                  onPress={() => {
-                    setWantsConsultation((v) => {
-                      const next = !v;
-                      if (next) {
-                        setConsultDateTime((prev) => ensureConsultValid(prev ?? clampToFuture(new Date())));
-                      } else {
-                        setConsultDateTime(null);
-                        setConsultNote("");
-                      }
-                      return next;
-                    });
-                  }}
-                  style={styles.agreeRow}
-                >
-                  <View style={[styles.smallBox, wantsConsultation && styles.smallBoxOn]}>
-                    {wantsConsultation && <Ionicons name="checkmark" size={14} color={OFF_WHITE} />}
-                  </View>
-                  <Text style={styles.agreeText}>
-                    Consultation before appointment <Text style={{ color: MUTED }}>(optional)</Text>
-                  </Text>
-                </Pressable>
-
-                {wantsConsultation && (
-                  <>
-                    <View style={[styles.stepCard, { marginTop: 12 }]}>
-                      <Pressable onPress={openConsultDate} style={styles.pickerRow}>
-                        <Text style={styles.pickerText}>{consultDateLabel}</Text>
-                        <Ionicons name="calendar-outline" size={18} color={"rgba(0,0,0,0.65)"} />
-                      </Pressable>
-                    </View>
-
-                    <View style={styles.stepCard}>
-                      <Pressable onPress={openConsultTime} style={styles.pickerRow}>
-                        <Text style={styles.pickerText}>{consultTimeLabel}</Text>
-                        <Ionicons name="time-outline" size={18} color={"rgba(0,0,0,0.65)"} />
-                      </Pressable>
-                    </View>
-
-                    <TextInput
-                      value={consultNote}
-                      onChangeText={setConsultNote}
-                      placeholder="Optional note for the artist"
-                      placeholderTextColor={"rgba(0,0,0,0.40)"}
-                      style={styles.consultInput}
-                      multiline
-                    />
-                  </>
-                )}
-              </View>
-            )}
-
+            {/* Optional consult (simple) */}
             <View style={[styles.summaryCard, { marginTop: 12 }]}>
-              <Pressable onPress={() => setJoinChannel((v) => !v)} style={styles.agreeRow}>
-                <View style={[styles.smallBox, joinChannel && styles.smallBoxOn]}>
-                  {joinChannel && <Ionicons name="checkmark" size={14} color={OFF_WHITE} />}
+              <Pressable
+                onPress={() => {
+                  setWantsConsultation((v) => {
+                    const next = !v;
+                    if (!next) {
+                      setConsultDateTime(null);
+                      setConsultNote("");
+                    } else {
+                      setConsultDateTime(clampToFuture(new Date()));
+                    }
+                    return next;
+                  });
+                }}
+                style={styles.agreeRow}
+              >
+                <View style={[styles.smallBox, wantsConsultation && styles.smallBoxOn]}>
+                  {wantsConsultation && <Ionicons name="checkmark" size={14} color={OFF_WHITE} />}
                 </View>
-                <Text style={styles.agreeText}>Join this professional’s community channel</Text>
+                <Text style={styles.agreeText}>
+                  Consultation before appointment <Text style={{ color: MUTED }}>(optional)</Text>
+                </Text>
               </Pressable>
 
-              <Pressable onPress={() => setAgreeTerms((v) => !v)} style={[styles.agreeRow, { marginTop: 10 }]}>
+              {wantsConsultation && (
+                <>
+                  <TextInput
+                    value={consultNote}
+                    onChangeText={setConsultNote}
+                    placeholder="Optional note for the artist"
+                    placeholderTextColor={"rgba(0,0,0,0.40)"}
+                    style={styles.consultInput}
+                    multiline
+                  />
+                </>
+              )}
+            </View>
+
+            <View style={[styles.summaryCard, { marginTop: 12 }]}>
+              <Pressable onPress={() => setAgreeTerms((v) => !v)} style={styles.agreeRow}>
                 <View style={[styles.smallBox, agreeTerms && styles.smallBoxOn]}>
                   {agreeTerms && <Ionicons name="checkmark" size={14} color={OFF_WHITE} />}
                 </View>
                 <Text style={styles.agreeText}>
-                  Agree to the <Text style={{ fontWeight: "900" }}>Terms & Services</Text> of booking with Smart Beauty
-                  Networking
+                  Agree to the <Text style={{ fontWeight: "900" }}>Terms & Services</Text> of booking
                 </Text>
               </Pressable>
             </View>
 
-            <Pressable
-              onPress={confirm}
-              disabled={!canConfirm}
-              style={[styles.confirmBtn, (!canConfirm || confirming) && { opacity: 0.55 }]}
-            >
+            <Pressable onPress={confirm} disabled={!canConfirm} style={[styles.confirmBtn, (!canConfirm || confirming) && { opacity: 0.55 }]}>
               <Text style={styles.confirmText}>{confirming ? "Confirming…" : "Confirm Booking"}</Text>
             </Pressable>
           </>
         )}
       </ScrollView>
 
-      {/* ANDROID native pickers */}
-      {Platform.OS === "android" && showAndroidDate && (
-        <DateTimePicker
-          value={selectedDateTime ?? clampToFuture(new Date())}
-          mode="date"
-          minimumDate={minDate}
-          maximumDate={maxDate}
-          onChange={onChangeBookingDateAndroid}
-          display="default"
-        />
-      )}
+      {/* ✅ CLEAN date picker with year selection */}
+      <DateTimePickerModal
+        isVisible={datePickerOpen}
+        mode="date"
+        date={selectedDateTime ?? clampToFuture(new Date())}
+        minimumDate={minDate}
+        maximumDate={maxDate}
+        onCancel={() => setDatePickerOpen(false)}
+        onConfirm={(picked) => {
+          // normalize to keep existing time (or set a sane default)
+          const base = selectedDateTime ?? clampToFuture(new Date());
+          const next = new Date(base);
+          next.setFullYear(picked.getFullYear(), picked.getMonth(), picked.getDate());
+
+          const ymd = toYMD(next);
+          if (blockedDays.has(ymd)) {
+            Alert.alert("Unavailable day", "This day is booked off by the artist. Please choose another date.");
+            // keep picker open for quick re-pick
+            return;
+          }
+
+          const fixed = clampToFuture(next);
+          setSelectedDateTime(fixed);
+          setDatePickerOpen(false);
+        }}
+      />
+
+      {/* Android time picker */}
       {Platform.OS === "android" && showAndroidTime && (
         <DateTimePicker
           value={selectedDateTime ?? clampToFuture(new Date())}
@@ -669,173 +730,47 @@ export default function BookingSelectedScreen({
           is24Hour={false}
         />
       )}
-      {Platform.OS === "android" && showAndroidConsultDate && (
-        <DateTimePicker
-          value={consultDateTime ?? clampToFuture(new Date())}
-          mode="date"
-          minimumDate={minDate}
-          // ✅ key fix: cap consult date based on booking + same-day rule
-          maximumDate={consultMaxDate}
-          onChange={onChangeConsultDateAndroid}
-          display="default"
-        />
-      )}
-      {Platform.OS === "android" && showAndroidConsultTime && (
-        <DateTimePicker
-          value={consultDateTime ?? clampToFuture(new Date())}
-          mode="time"
-          onChange={onChangeConsultTimeAndroid}
-          display="default"
-          minuteInterval={5}
-          is24Hour={false}
-        />
-      )}
 
-      {/* iOS DATE modals (native date picker is stable) */}
+      {/* iOS time list modal */}
       {Platform.OS === "ios" && (
-        <>
-          <Modal visible={iosDateOpen} transparent animationType="fade" onRequestClose={() => setIosDateOpen(false)}>
-            <View style={styles.modalBackdrop}>
-              <View style={styles.modalCard}>
-                <View style={styles.modalHeader}>
-                  <Text style={styles.modalTitle}>Select date</Text>
-                  <Pressable onPress={() => setIosDateOpen(false)} style={styles.modalCloseBtn}>
-                    <Ionicons name="close" size={18} color={BLACK} />
-                  </Pressable>
-                </View>
-
-                <View style={styles.modalInner}>
-                  <DateTimePicker
-                    value={selectedDateTime ?? clampToFuture(new Date())}
-                    mode="date"
-                    display="inline"
-                    minimumDate={minDate}
-                    maximumDate={maxDate}
-                    onChange={onChangeIOSBookingDate}
-                    style={{ width: "100%" }}
-                  />
-                </View>
-
-                <Pressable onPress={() => setIosDateOpen(false)} style={styles.doneBtn}>
-                  <Text style={styles.doneText}>Done</Text>
+        <Modal visible={iosTimeOpen} transparent animationType="fade" onRequestClose={() => setIosTimeOpen(false)}>
+          <View style={styles.modalBackdrop}>
+            <View style={styles.modalCardTall}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Select time</Text>
+                <Pressable onPress={() => setIosTimeOpen(false)} style={styles.modalCloseBtn}>
+                  <Ionicons name="close" size={18} color={BLACK} />
                 </Pressable>
               </View>
+
+              <ScrollView style={styles.timeList} contentContainerStyle={{ paddingBottom: 10 }}>
+                {timeOptions.map((t) => {
+                  const key = `${t.h}:${t.m}`;
+                  const isSelected = !!selectedDateTime && selectedDateTime.getHours() === t.h && selectedDateTime.getMinutes() === t.m;
+                  const isDisabled = !!selectedDateTime && disabledTimes.has(key);
+
+                  return (
+                    <Pressable
+                      key={key}
+                      disabled={isDisabled}
+                      onPress={() => {
+                        if (isDisabled) return;
+                        setBookingTimeIOS(t.h, t.m);
+                        setIosTimeOpen(false);
+                      }}
+                      style={[styles.timeRow, isSelected && styles.timeRowSelected, isDisabled && { opacity: 0.35 }]}
+                    >
+                      <Text style={[styles.timeText, isSelected && styles.timeTextSelected]}>{t.label} {isDisabled ? "• Unavailable" : ""}</Text>
+                      <Text style={[styles.timeSub, isSelected && styles.timeTextSelected]}>
+                        {pad2(t.h)}:{pad2(t.m)}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
             </View>
-          </Modal>
-
-          <Modal
-            visible={iosConsultDateOpen}
-            transparent
-            animationType="fade"
-            onRequestClose={() => setIosConsultDateOpen(false)}
-          >
-            <View style={styles.modalBackdrop}>
-              <View style={styles.modalCard}>
-                <View style={styles.modalHeader}>
-                  <Text style={styles.modalTitle}>Consultation date</Text>
-                  <Pressable onPress={() => setIosConsultDateOpen(false)} style={styles.modalCloseBtn}>
-                    <Ionicons name="close" size={18} color={BLACK} />
-                  </Pressable>
-                </View>
-
-                <View style={styles.modalInner}>
-                  <DateTimePicker
-                    value={consultDateTime ?? clampToFuture(new Date())}
-                    mode="date"
-                    display="inline"
-                    minimumDate={minDate}
-                    // ✅ key fix: cap consult date based on booking + same-day rule
-                    maximumDate={consultMaxDate}
-                    onChange={onChangeIOSConsultDate}
-                    style={{ width: "100%" }}
-                  />
-                </View>
-
-                <Pressable onPress={() => setIosConsultDateOpen(false)} style={styles.doneBtn}>
-                  <Text style={styles.doneText}>Done</Text>
-                </Pressable>
-              </View>
-            </View>
-          </Modal>
-
-          {/* iOS TIME modals (custom list — avoids native crash) */}
-          <Modal visible={iosTimeOpen} transparent animationType="fade" onRequestClose={() => setIosTimeOpen(false)}>
-            <View style={styles.modalBackdrop}>
-              <View style={styles.modalCardTall}>
-                <View style={styles.modalHeader}>
-                  <Text style={styles.modalTitle}>Select time</Text>
-                  <Pressable onPress={() => setIosTimeOpen(false)} style={styles.modalCloseBtn}>
-                    <Ionicons name="close" size={18} color={BLACK} />
-                  </Pressable>
-                </View>
-
-                <ScrollView style={styles.timeList} contentContainerStyle={{ paddingBottom: 10 }}>
-                  {timeOptions.map((t) => {
-                    const isSelected =
-                      !!selectedDateTime &&
-                      selectedDateTime.getHours() === t.h &&
-                      selectedDateTime.getMinutes() === t.m;
-                    return (
-                      <Pressable
-                        key={`${t.h}:${t.m}`}
-                        onPress={() => {
-                          setBookingTime(t.h, t.m);
-                          setIosTimeOpen(false);
-                        }}
-                        style={[styles.timeRow, isSelected && styles.timeRowSelected]}
-                      >
-                        <Text style={[styles.timeText, isSelected && styles.timeTextSelected]}>{t.label}</Text>
-                        <Text style={[styles.timeSub, isSelected && styles.timeTextSelected]}>
-                          {pad2(t.h)}:{pad2(t.m)}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            </View>
-          </Modal>
-
-          <Modal
-            visible={iosConsultTimeOpen}
-            transparent
-            animationType="fade"
-            onRequestClose={() => setIosConsultTimeOpen(false)}
-          >
-            <View style={styles.modalBackdrop}>
-              <View style={styles.modalCardTall}>
-                <View style={styles.modalHeader}>
-                  <Text style={styles.modalTitle}>Consultation time</Text>
-                  <Pressable onPress={() => setIosConsultTimeOpen(false)} style={styles.modalCloseBtn}>
-                    <Ionicons name="close" size={18} color={BLACK} />
-                  </Pressable>
-                </View>
-
-                <ScrollView style={styles.timeList} contentContainerStyle={{ paddingBottom: 10 }}>
-                  {filteredConsultTimeOptions.map((t) => {
-                    const isSelected =
-                      !!consultDateTime && consultDateTime.getHours() === t.h && consultDateTime.getMinutes() === t.m;
-                    return (
-                      <Pressable
-                        key={`c-${t.h}:${t.m}`}
-                        onPress={() => {
-                          setConsultTime(t.h, t.m);
-                          setIosConsultTimeOpen(false);
-                        }}
-                        style={[styles.timeRow, isSelected && styles.timeRowSelected]}
-                      >
-                        <Text style={[styles.timeText, isSelected && styles.timeTextSelected]}>{t.label}</Text>
-                        <Text style={[styles.timeSub, isSelected && styles.timeTextSelected]}>
-                          {pad2(t.h)}:{pad2(t.m)}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            </View>
-          </Modal>
-        </>
+          </View>
+        </Modal>
       )}
     </SafeAreaView>
   );
@@ -853,7 +788,6 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingBottom: 24,
   },
-
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   iconBtn: {
     width: 44,
@@ -889,7 +823,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: BORDER,
   },
-
   pickerRow: {
     backgroundColor: OFF_WHITE,
     paddingVertical: 12,
@@ -900,6 +833,7 @@ const styles = StyleSheet.create({
     borderRadius: 18,
   },
   pickerText: { color: BLACK, fontWeight: "900" },
+  availHint: { marginTop: 8, color: MUTED, fontWeight: "800", fontSize: 12, lineHeight: 16 },
 
   agreeRow: { flexDirection: "row", gap: 10, alignItems: "flex-start" },
   smallBox: {
@@ -951,22 +885,15 @@ const styles = StyleSheet.create({
   },
   btnOutlineText: { color: BLACK, fontWeight: "900" },
 
-  // modals
+  // iOS time modal
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.25)", padding: 18, justifyContent: "center" },
-  modalCard: {
-    backgroundColor: OFF_WHITE,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: BORDER,
-    padding: 14,
-  },
   modalCardTall: {
     backgroundColor: OFF_WHITE,
     borderRadius: 18,
     borderWidth: 1,
     borderColor: BORDER,
     padding: 14,
-    maxHeight: "78%",
+    maxHeight: "82%",
   },
   modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
   modalTitle: { fontSize: 15, fontWeight: "900", color: BLACK },
@@ -978,24 +905,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: SOFT,
   },
-  modalInner: {
-    overflow: "hidden",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: BORDER,
-    backgroundColor: OFF_WHITE,
-  },
-  doneBtn: {
-    marginTop: 12,
-    alignSelf: "flex-end",
-    backgroundColor: BLACK,
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-  },
-  doneText: { color: OFF_WHITE, fontWeight: "900" },
-
-  // time list
   timeList: {
     borderRadius: 14,
     borderWidth: 1,

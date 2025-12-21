@@ -12,6 +12,7 @@ import {
   ScrollView,
   ActivityIndicator,
   Modal,
+  TextInput,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
@@ -37,6 +38,13 @@ const CARD_BG = "rgba(0,0,0,0.03)";
 
 type ArtistFilter = "all" | "consultations";
 type ConsultStatus = "" | "requested" | "proposed" | "scheduled" | "declined";
+
+type StatusFilter = "all" | "pending" | "accepted" | "cancelled" | "completed";
+type SortMode = "soonest" | "newest" | "oldest";
+const PAGE_SIZE = 20;
+
+// ✅ accordion inner scroll max height (tweak if needed)
+const ACCORDION_MAX_HEIGHT = 520;
 
 function normConsultStatus(raw: any): ConsultStatus {
   const v = String(raw ?? "").trim().toLowerCase();
@@ -66,11 +74,16 @@ function formatDatePretty(d: Date) {
     time: d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }),
   };
 }
-
-function shortId(id?: string | null) {
-  if (!id) return "—";
-  return `${id.slice(0, 6)}…`;
+function formatDateOnly(d: Date) {
+  if (!d || isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
+
 function normalizeProfileMaybeArray(p: any) {
   if (!p) return null;
   return Array.isArray(p) ? p[0] ?? null : p;
@@ -79,7 +92,6 @@ function bestDisplayName(profile: any, fallbackLabel: string) {
   const p = normalizeProfileMaybeArray(profile);
   const full = String(p?.full_name ?? "").trim();
   const user = String(p?.username ?? "").trim();
-  // ✅ Never show raw IDs to users
   return full || user || fallbackLabel;
 }
 function hasConsultation(b: any) {
@@ -96,7 +108,7 @@ function startOfDay(d: Date) {
 }
 function endOfDay(d: Date) {
   const x = new Date(d);
-  x.setHours(23, 59, 0, 0);
+  x.setHours(23, 59, 59, 999);
   return x;
 }
 function addDays(d: Date, days: number) {
@@ -106,6 +118,27 @@ function addDays(d: Date, days: number) {
 }
 function sameDay(a: Date, b: Date) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function startOfWeek(d: Date) {
+  const x = startOfDay(d);
+  const day = x.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  return addDays(x, diff);
+}
+function endOfWeek(d: Date) {
+  return endOfDay(addDays(startOfWeek(d), 6));
+}
+function startOfMonth(d: Date) {
+  const x = startOfDay(d);
+  x.setDate(1);
+  return x;
+}
+function endOfMonth(d: Date) {
+  const x = startOfMonth(d);
+  x.setMonth(x.getMonth() + 1);
+  x.setMilliseconds(-1);
+  return x;
 }
 
 function applyPickedTime(baseDate: Date, pickedTime: Date) {
@@ -136,11 +169,6 @@ function snapToMinuteStep(d: Date, step: number) {
   return out;
 }
 
-/**
- * Consultation max time rules relative to BOOKING START:
- * - allowSameDay=false → latest is day BEFORE booking at 23:59
- * - allowSameDay=true  → latest is bookingTime - 5 minutes (must be strictly before booking)
- */
 function consultationMaxForBooking(bookingStart: Date, allowSameDay: boolean) {
   if (allowSameDay) return addMinutes(bookingStart, -5);
   return endOfDay(addDays(startOfDay(bookingStart), -1));
@@ -218,7 +246,6 @@ function PickerSheet(props: {
   );
 }
 
-/** who proposed last */
 function metaProposedBy(meta: any): "client" | "artist" | null {
   const note = String(meta?.proposed_note ?? "").toLowerCase();
   if (note.includes("from_client")) return "client";
@@ -248,11 +275,6 @@ function consultStatusLabel(s: ConsultStatus) {
   return "Requested";
 }
 
-/**
- * ✅ RLS-safe hydration:
- * Sometimes the joined `client_profile` / `artist_profile` comes back null due to RLS.
- * We patch names by fetching profiles directly for the IDs we need.
- */
 async function hydrateProfilesIntoBookings(rows: BookingRow[]) {
   const ids = new Set<string>();
   (rows ?? []).forEach((b: any) => {
@@ -268,20 +290,116 @@ async function hydrateProfilesIntoBookings(rows: BookingRow[]) {
     .select("id, full_name, username, phone, allow_same_day_consultation")
     .in("id", list);
 
-  if (error) {
-    // If profiles are also blocked, just return original rows
-    return rows;
-  }
+  if (error) return rows;
 
   const map = new Map<string, any>();
   (data ?? []).forEach((p: any) => map.set(String(p.id), p));
 
   return (rows ?? []).map((b: any) => {
     const patched = { ...b } as any;
-    if (!patched.client_profile && map.has(String(patched.client_id))) patched.client_profile = map.get(String(patched.client_id));
-    if (!patched.artist_profile && map.has(String(patched.artist_id))) patched.artist_profile = map.get(String(patched.artist_id));
+    if (!patched.client_profile && map.has(String(patched.client_id)))
+      patched.client_profile = map.get(String(patched.client_id));
+    if (!patched.artist_profile && map.has(String(patched.artist_id)))
+      patched.artist_profile = map.get(String(patched.artist_id));
     return patched;
   });
+}
+
+type DateRange = { start: Date; end: Date };
+type ParsedQuery = {
+  text: string;
+  status?: BookingStatus;
+  range?: DateRange;
+  mode?: "upcoming";
+};
+
+function normalizeStatusToken(t: string): BookingStatus | undefined {
+  const x = t.toLowerCase();
+  if (x === "pending" || x === "awaiting") return "pending";
+  if (x === "accepted" || x === "accept" || x === "confirmed" || x === "confirm") return "accepted";
+  if (x === "cancelled" || x === "canceled" || x === "cancel" || x === "void") return "cancelled";
+  if (x === "completed" || x === "complete" || x === "done" || x === "finished") return "completed";
+  return undefined;
+}
+
+function parseSmartQuery(input: string): ParsedQuery {
+  const raw = String(input ?? "").trim().toLowerCase();
+  if (!raw) return { text: "" };
+
+  const now = new Date();
+  let status: BookingStatus | undefined;
+  let range: DateRange | undefined;
+  let mode: "upcoming" | undefined;
+
+  const has = (p: string) => raw.includes(p);
+
+  if (has("today")) range = { start: startOfDay(now), end: endOfDay(now) };
+  else if (has("yesterday")) {
+    const d = addDays(now, -1);
+    range = { start: startOfDay(d), end: endOfDay(d) };
+  } else if (has("tomorrow")) {
+    const d = addDays(now, 1);
+    range = { start: startOfDay(d), end: endOfDay(d) };
+  } else if (has("this week")) range = { start: startOfWeek(now), end: endOfWeek(now) };
+  else if (has("next week")) {
+    const d = addDays(startOfWeek(now), 7);
+    range = { start: startOfWeek(d), end: endOfWeek(d) };
+  } else if (has("last week")) {
+    const d = addDays(startOfWeek(now), -7);
+    range = { start: startOfWeek(d), end: endOfWeek(d) };
+  } else if (has("this month")) range = { start: startOfMonth(now), end: endOfMonth(now) };
+  else if (has("next month")) {
+    const d = new Date(now);
+    d.setMonth(d.getMonth() + 1);
+    range = { start: startOfMonth(d), end: endOfMonth(d) };
+  } else if (has("last month")) {
+    const d = new Date(now);
+    d.setMonth(d.getMonth() - 1);
+    range = { start: startOfMonth(d), end: endOfMonth(d) };
+  }
+
+  if (has("upcoming") || has("future") || has("next")) mode = "upcoming";
+
+  const noise = new Set([
+    "today",
+    "tomorrow",
+    "yesterday",
+    "this",
+    "next",
+    "last",
+    "week",
+    "month",
+    "upcoming",
+    "future",
+  ]);
+
+  const tokens = raw.split(/\s+/).filter(Boolean);
+  for (const t of tokens) {
+    if (!status) {
+      const s = normalizeStatusToken(t);
+      if (s) status = s;
+    }
+  }
+
+  const leftover = tokens.filter((t) => !noise.has(t) && !normalizeStatusToken(t)).join(" ").trim();
+  return { text: leftover, status, range, mode };
+}
+
+function inRange(iso: string, range: DateRange) {
+  const t = new Date(iso).getTime();
+  return t >= range.start.getTime() && t <= range.end.getTime();
+}
+
+function safeTs(iso: any) {
+  const d = new Date(String(iso ?? ""));
+  const t = d.getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+function sortLabel(mode: SortMode) {
+  if (mode === "soonest") return "Next up";
+  if (mode === "newest") return "Recently added";
+  return "Oldest first";
 }
 
 export default function BookingsScreen({ onBack }: { onBack: () => void }) {
@@ -299,7 +417,20 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
   const [artistFilter, setArtistFilter] = useState<ArtistFilter>("all");
   const bootRef = useRef(0);
 
-  // compose
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sortMode, setSortMode] = useState<SortMode>("soonest");
+  const [page, setPage] = useState(1);
+
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
+  const [filterDate, setFilterDate] = useState<Date | null>(null);
+  const [filterDateDraft, setFilterDateDraft] = useState<Date>(new Date());
+  const [iosDateOpen, setIosDateOpen] = useState(false);
+  const [showAndroidFilterDate, setShowAndroidFilterDate] = useState(false);
+
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+
   const [composeId, setComposeId] = useState<string | null>(null);
   const [composeBookingStartIso, setComposeBookingStartIso] = useState<string | null>(null);
   const [composeAllowSameDay, setComposeAllowSameDay] = useState(false);
@@ -363,11 +494,85 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
+  useEffect(() => {
+    setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, statusFilter, sortMode, artistFilter, role, bookings.length, filterDate?.toISOString()]);
+
   const visibleBookings = useMemo(() => {
     if (role !== "artist") return bookings;
     if (artistFilter === "consultations") return bookings.filter((b: any) => hasConsultation(b));
     return bookings;
   }, [bookings, role, artistFilter]);
+
+  const filteredBookings = useMemo(() => {
+    let list = [...(visibleBookings ?? [])];
+
+    if (statusFilter !== "all") {
+      list = list.filter((b: any) => String(b?.status ?? "").toLowerCase() === statusFilter);
+    }
+
+    if (filterDate) {
+      const r = { start: startOfDay(filterDate), end: endOfDay(filterDate) };
+      list = list.filter((b: any) => inRange(b.start_time, r));
+    }
+
+    const parsed = parseSmartQuery(searchQuery);
+
+    if (parsed.status) {
+      list = list.filter((b: any) => String(b?.status ?? "").toLowerCase() === parsed.status);
+    }
+
+    if (parsed.range) {
+      list = list.filter((b: any) => inRange(b.start_time, parsed.range!));
+    }
+
+    if (parsed.mode === "upcoming") {
+      const nowT = Date.now();
+      list = list.filter((b: any) => safeTs(b.start_time) >= nowT);
+    }
+
+    if (parsed.text) {
+      const q = parsed.text.toLowerCase();
+      list = list.filter((b: any) => {
+        const who =
+          role === "artist"
+            ? bestDisplayName(b.client_profile, "Client")
+            : bestDisplayName(b.artist_profile, "Artist");
+        return who.toLowerCase().includes(q);
+      });
+    }
+
+    if (sortMode === "soonest") list.sort((a: any, b: any) => safeTs(a?.start_time) - safeTs(b?.start_time));
+    else if (sortMode === "newest") list.sort((a: any, b: any) => safeTs(b?.created_at) - safeTs(a?.created_at));
+    else list.sort((a: any, b: any) => safeTs(a?.created_at) - safeTs(b?.created_at));
+
+    return list;
+  }, [visibleBookings, role, searchQuery, statusFilter, sortMode, filterDate]);
+
+  const pagedBookings = useMemo(() => {
+    const take = Math.max(1, page) * PAGE_SIZE;
+    return filteredBookings.slice(0, take);
+  }, [filteredBookings, page]);
+
+  const canLoadMore = pagedBookings.length < filteredBookings.length;
+
+  const groupedBookings = useMemo(() => {
+    const map = new Map<string, { id: string; label: string; items: any[] }>();
+
+    for (const b of pagedBookings as any[]) {
+      const otherId = role === "artist" ? String(b.client_id ?? "unknown") : String(b.artist_id ?? "unknown");
+      const label =
+        role === "artist"
+          ? bestDisplayName(b.client_profile, "Client")
+          : bestDisplayName(b.artist_profile, "Artist");
+
+      if (!map.has(otherId)) map.set(otherId, { id: otherId, label, items: [] });
+      map.get(otherId)!.items.push(b);
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [pagedBookings, role]);
 
   const doUpdateStatus = async (id: string, status: BookingStatus) => {
     if (mutatingId) return;
@@ -404,7 +609,6 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
-  // consultation
   const closeCompose = () => {
     setComposeId(null);
     setComposeBookingStartIso(null);
@@ -576,6 +780,376 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const setQuick = (phrase: "today" | "this week" | "this month" | "upcoming") => {
+    setSearchQuery(phrase);
+  };
+
+  const clearAllFilters = () => {
+    setSearchQuery("");
+    setStatusFilter("all");
+    setArtistFilter("all");
+    setSortMode("soonest");
+    setFilterDate(null);
+    setFilterDateDraft(new Date());
+    setIosDateOpen(false);
+  };
+
+  const commitFilterDate = (picked: Date) => {
+    const d = startOfDay(picked);
+    setFilterDate(d);
+    setFilterDateDraft(d);
+  };
+
+  const openFilterDatePicker = () => {
+    const base = filterDate ?? new Date();
+    setFilterDateDraft(base);
+
+    if (Platform.OS === "ios") {
+      setIosDateOpen((v) => !v);
+      return;
+    }
+
+    setFiltersOpen(false);
+    setTimeout(() => setShowAndroidFilterDate(true), 50);
+  };
+
+  const clearFilterDate = () => {
+    setFilterDate(null);
+    setFilterDateDraft(new Date());
+    setIosDateOpen(false);
+  };
+
+  const onAndroidFilterDateChange = (e: DateTimePickerEvent, picked?: Date) => {
+    if (e.type === "dismissed") {
+      setShowAndroidFilterDate(false);
+      setTimeout(() => setFiltersOpen(true), 50);
+      return;
+    }
+
+    if (picked) commitFilterDate(picked);
+
+    setShowAndroidFilterDate(false);
+    setTimeout(() => setFiltersOpen(true), 50);
+  };
+
+  const activePills = useMemo(() => {
+    const pills: Array<{ key: string; label: string; onClear: () => void }> = [];
+    const q = searchQuery.trim();
+    const qLower = q.toLowerCase();
+
+    const prettyQueryLabel =
+      qLower === "today"
+        ? "Today"
+        : qLower === "this week"
+        ? "This week"
+        : qLower === "this month"
+        ? "This month"
+        : qLower === "upcoming"
+        ? "Upcoming"
+        : q;
+
+    if (q) pills.push({ key: "q", label: prettyQueryLabel, onClear: () => setSearchQuery("") });
+
+    if (filterDate) {
+      pills.push({
+        key: "date",
+        label: `Date: ${formatDateOnly(filterDate)}`,
+        onClear: () => clearFilterDate(),
+      });
+    }
+
+    if (statusFilter !== "all") {
+      pills.push({
+        key: "status",
+        label:
+          statusFilter === "pending"
+            ? "Status: Pending"
+            : statusFilter === "accepted"
+            ? "Status: Accepted"
+            : statusFilter === "cancelled"
+            ? "Status: Cancelled"
+            : "Status: Completed",
+        onClear: () => setStatusFilter("all"),
+      });
+    }
+
+    if (role === "artist" && artistFilter !== "all") {
+      pills.push({ key: "artistFilter", label: "Consultations only", onClear: () => setArtistFilter("all") });
+    }
+
+    if (sortMode !== "soonest") {
+      pills.push({ key: "sort", label: `Sort: ${sortLabel(sortMode)}`, onClear: () => setSortMode("soonest") });
+    }
+
+    return pills;
+  }, [searchQuery, statusFilter, artistFilter, sortMode, role, filterDate]);
+
+  // ✅ booking card renderer
+  // - moved "remove" into a subtle ⋯ menu (top right) for completed/cancelled bookings
+  // - proposed badge is full-width and wraps safely (no overflow)
+  const renderBookingCard = (b: any) => {
+    const isPending = b.status === "pending";
+    const isAccepted = b.status === "accepted";
+    const isCancelled = b.status === "cancelled";
+    const isCompleted = b.status === "completed";
+
+    const bookingLive = !isCancelled && !isCompleted;
+
+    const when = formatIsoPretty(b.start_time);
+
+    const consultationRequested = hasConsultation(b);
+    const consultStatus = normConsultStatus(b?.consultation_meta?.consult_status);
+    const meta = b?.consultation_meta ?? {};
+
+    const proposedIso: string | null =
+      meta?.proposed_time_iso ??
+      (Array.isArray(meta?.availability) && meta.availability[0] ? String(meta.availability[0]) : null);
+
+    const proposedPretty = proposedIso ? formatIsoPretty(proposedIso) : null;
+
+    const proposedBy = metaProposedBy(meta);
+    const iProposedLast =
+      proposedBy && ((proposedBy === "client" && role === "client") || (proposedBy === "artist" && role === "artist"));
+
+    const canAcceptConsult =
+      bookingLive && !!proposedIso && consultStatus !== "scheduled" && consultStatus !== "declined" && !iProposedLast;
+
+    const canProposeInRequested = consultStatus === "requested" && role === "artist";
+    const canProposeInProposed = consultStatus === "proposed" && !iProposedLast;
+    const canProposeInBlank = consultStatus === "" && role === "artist";
+
+    const canOpenCompose =
+      bookingLive &&
+      consultationRequested &&
+      consultStatus !== "scheduled" &&
+      consultStatus !== "declined" &&
+      (canProposeInRequested || canProposeInProposed || canProposeInBlank);
+
+    const waitingText =
+      consultStatus === "scheduled"
+        ? "Consultation confirmed."
+        : consultStatus === "declined"
+        ? "Consultation declined."
+        : consultStatus === "proposed"
+        ? iProposedLast
+          ? "Waiting for the other person to respond."
+          : "You can accept, or propose another time."
+        : consultStatus === "requested"
+        ? role === "artist"
+          ? "Client requested a consultation — propose a time."
+          : "Waiting for the artist to propose a time."
+        : consultationRequested && role === "client"
+        ? "Waiting for the artist to propose a time."
+        : "";
+
+    const showOverflow = isCancelled || isCompleted;
+    const showRemoveInline = consultationRequested || showOverflow;
+
+    return (
+      <View style={styles.bookingCard}>
+        {/* BOOKING section */}
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionTop}>
+            <Text style={styles.sectionTitle}>Booking</Text>
+
+            <View style={styles.sectionRightRow}>
+              <View style={[styles.sectionPill, styles.bookingPill]}>
+                <Text style={styles.sectionPillText}>{bookingStatusLabel(b.status)}</Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={{ marginTop: 8 }}>
+            <Text style={styles.dateText}>{when.date}</Text>
+            <Text style={styles.timeText}>{when.time}</Text>
+          </View>
+
+          <View style={[styles.actionRow, { marginTop: 10 }]}>
+            {role === "artist" && isPending && (
+              <Pressable
+                disabled={mutatingId === b.id}
+                onPress={() => doUpdateStatus(b.id, "accepted")}
+                style={[styles.primaryBtn, mutatingId === b.id && styles.disabledBtn]}
+              >
+                <Ionicons name="checkmark" size={18} color={OFF_WHITE} />
+                <Text style={styles.primaryBtnText}>Accept booking</Text>
+              </Pressable>
+            )}
+
+            {role === "artist" && (isPending || isAccepted) && (
+              <Pressable
+                disabled={mutatingId === b.id}
+                onPress={() =>
+                  Alert.alert("Cancel booking?", "This will cancel the booking.", [
+                    { text: "No" },
+                    { text: "Yes", onPress: () => doUpdateStatus(b.id, "cancelled") },
+                  ])
+                }
+                style={[styles.secondaryBtn, mutatingId === b.id && styles.disabledBtn]}
+              >
+                <Ionicons name="close-circle-outline" size={18} color={BLACK} />
+                <Text style={styles.secondaryBtnText}>Cancel booking</Text>
+              </Pressable>
+            )}
+
+            {role === "artist" && isAccepted && (
+              <Pressable
+                disabled={mutatingId === b.id}
+                onPress={() => doUpdateStatus(b.id, "completed")}
+                style={[styles.secondaryBtn, mutatingId === b.id && styles.disabledBtn]}
+              >
+                <Ionicons name="checkmark-circle-outline" size={18} color={BLACK} />
+                <Text style={styles.secondaryBtnText}>Mark completed</Text>
+              </Pressable>
+            )}
+          </View>
+{consultationRequested && (
+  <View style={styles.hintRow}>
+    <Text style={styles.sectionHintInline}>
+      Booking acceptance does <Text style={{ fontWeight: "900" }}>not</Text> confirm the consultation.
+    </Text>
+
+    {showRemoveInline && (
+      <Pressable
+        disabled={mutatingId === b.id}
+        onPress={() =>
+          Alert.alert("Remove booking?", "This will remove it from your view.", [
+            { text: "Cancel", style: "cancel" },
+            { text: "Remove", style: "destructive", onPress: () => doRemoveForMe(b.id) },
+          ])
+        }
+        style={[styles.deleteInlineBtn, mutatingId === b.id && styles.disabledBtn]}
+        accessibilityLabel="Remove booking"
+      >
+        <Ionicons name="trash-outline" size={16} color={BLACK} />
+      </Pressable>
+    )}
+  </View>
+)}
+
+
+
+        </View>
+
+        {/* CONSULTATION */}
+        {consultationRequested && (
+          <View style={styles.sectionCard}>
+            <View style={styles.sectionTop}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Ionicons name="videocam-outline" size={16} color={BLACK} />
+                <Text style={styles.sectionTitle}>Consultation</Text>
+              </View>
+              <View style={[styles.sectionPill, styles.consultPill]}>
+                <Text style={styles.sectionPillText}>{consultStatusLabel(consultStatus || "requested")}</Text>
+              </View>
+            </View>
+
+            {!bookingLive && (
+              <Text style={styles.waitingText}>This booking is no longer active, so consultation actions are disabled</Text>
+            )}
+
+            {!!waitingText && <Text style={styles.waitingText}>{waitingText}</Text>}
+
+            {proposedPretty && (
+              <View style={styles.proposedBadge}>
+                <Ionicons name="time-outline" size={14} color={BLACK} />
+                <Text style={styles.proposedBadgeText}>
+                  Proposed{proposedBy ? ` (${proposedBy})` : ""}: {proposedPretty.date} · {proposedPretty.time}
+                </Text>
+              </View>
+            )}
+
+            {composeId === b.id && composeValue && bookingLive && (
+              <View style={styles.proposeBox}>
+                <View style={styles.proposeHeaderRow}>
+                  <Text style={styles.proposeTitle}>Propose consultation time</Text>
+                  <Pressable onPress={showCalendarHelp} style={styles.infoIconBtn}>
+                    <Ionicons name="information-circle-outline" size={20} color={BLACK} />
+                  </Pressable>
+                </View>
+
+                <View style={styles.proposeRow}>
+                  <Pressable onPress={openDate} style={styles.proposeBtn}>
+                    <Ionicons name="calendar-outline" size={16} color={BLACK} />
+                    <Text style={styles.proposeBtnText}>{formatDatePretty(composeValue).date}</Text>
+                  </Pressable>
+
+                  <Pressable onPress={openTime} style={styles.proposeBtn}>
+                    <Ionicons name="time-outline" size={16} color={BLACK} />
+                    <Text style={styles.proposeBtnText}>{formatDatePretty(composeValue).time}</Text>
+                  </Pressable>
+                </View>
+
+                <View style={styles.proposeActions}>
+                  <Pressable onPress={closeCompose} style={styles.secondaryBtn}>
+                    <Text style={styles.secondaryBtnText}>Cancel</Text>
+                  </Pressable>
+
+                  <Pressable
+                    disabled={mutatingId === b.id || showDateSheet || showTimeSheet}
+                    onPress={sendProposal}
+                    style={[
+                      styles.primaryBtn,
+                      (mutatingId === b.id || showDateSheet || showTimeSheet) && styles.disabledBtn,
+                    ]}
+                  >
+                    <Text style={styles.primaryBtnText}>Send proposal</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+
+            <View style={[styles.actionRow, { marginTop: 10 }]}>
+              {bookingLive && canOpenCompose && composeId !== b.id && (
+                <Pressable
+                  disabled={mutatingId === b.id}
+                  onPress={() => openCompose(b)}
+                  style={[styles.secondaryBtn, mutatingId === b.id && styles.disabledBtn]}
+                >
+                  <Ionicons name="time-outline" size={18} color={BLACK} />
+                  <Text style={styles.secondaryBtnText}>
+                    {consultStatus === "proposed" ? "Propose another time" : "Propose consultation time"}
+                  </Text>
+                </Pressable>
+              )}
+
+              {bookingLive && canAcceptConsult && proposedIso && (
+                <Pressable
+                  disabled={mutatingId === b.id}
+                  onPress={() => acceptProposal(b.id, proposedIso)}
+                  style={[styles.primaryBtn, mutatingId === b.id && styles.disabledBtn]}
+                >
+                  <Ionicons name="checkmark" size={18} color={OFF_WHITE} />
+                  <Text style={styles.primaryBtnText}>Accept consultation time</Text>
+                </Pressable>
+              )}
+
+              {bookingLive && consultStatus !== "scheduled" && consultStatus !== "declined" && (
+                <Pressable
+                  disabled={mutatingId === b.id}
+                  onPress={() =>
+                    Alert.alert(
+                      "Decline consultation?",
+                      "This will decline the consultation only. The booking stays the same.",
+                      [
+                        { text: "No" },
+                        { text: "Decline", onPress: () => declineConsultation(b.id), style: "destructive" },
+                      ]
+                    )
+                  }
+                  style={[styles.secondaryBtn, mutatingId === b.id && styles.disabledBtn]}
+                >
+                  <Ionicons name="close-circle-outline" size={18} color={BLACK} />
+                  <Text style={styles.secondaryBtnText}>Decline consultation</Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
+
   if (!ready) {
     return (
       <SafeAreaView style={styles.safe}>
@@ -586,6 +1160,8 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
     );
   }
 
+  const showEmpty = filteredBookings.length === 0;
+
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.screen}>
@@ -594,326 +1170,336 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
             <Ionicons name="chevron-back" size={22} color="rgba(0,0,0,0.75)" />
           </Pressable>
 
-          <Pressable onPress={refreshBookingsOnly} style={styles.iconBtn}>
-            {bookingsLoading ? <ActivityIndicator /> : <Ionicons name="refresh" size={20} color="rgba(0,0,0,0.75)" />}
-          </Pressable>
+          <View style={{ flexDirection: "row", gap: 10, alignItems: "center" }}>
+            <Pressable onPress={() => setFiltersOpen(true)} style={styles.filterBtnTop} accessibilityLabel="Open filters">
+              <Ionicons name="options-outline" size={18} color={BLACK} />
+            </Pressable>
+
+            <Pressable onPress={refreshBookingsOnly} style={styles.iconBtn}>
+              {bookingsLoading ? <ActivityIndicator /> : <Ionicons name="refresh" size={20} color="rgba(0,0,0,0.75)" />}
+            </Pressable>
+          </View>
         </View>
 
         <Text style={styles.h1}>Bookings</Text>
-        <Text style={styles.sub}>
-          {role === "artist"
-            ? "Booking acceptance and consultation scheduling are separate."
-            : "Your booking and consultation are managed separately."}
-        </Text>
+        <Text style={styles.sub}>Track your booking requests and confirmations.</Text>
 
-        {role === "artist" && (
-          <View style={styles.filterRow}>
-            <Pressable
-              onPress={() => setArtistFilter("all")}
-              style={[styles.filterPill, artistFilter === "all" && styles.filterPillOn]}
-            >
-              <Text style={[styles.filterText, artistFilter === "all" && styles.filterTextOn]}>All</Text>
+        <View style={styles.searchBox}>
+          <Ionicons name="search-outline" size={18} color="rgba(0,0,0,0.55)" />
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder={
+              role === "artist"
+                ? "Search"
+                : "Search"
+            }
+            placeholderTextColor="rgba(0,0,0,0.35)"
+            style={styles.searchInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+          />
+          {!!searchQuery && (
+            <Pressable onPress={() => setSearchQuery("")} style={styles.clearBtn} accessibilityLabel="Clear search">
+              <Ionicons name="close" size={16} color="rgba(0,0,0,0.70)" />
             </Pressable>
+          )}
+        </View>
 
-            <Pressable
-              onPress={() => setArtistFilter("consultations")}
-              style={[styles.filterPill, artistFilter === "consultations" && styles.filterPillOn]}
-            >
-              <Ionicons name="videocam-outline" size={16} color={artistFilter === "consultations" ? OFF_WHITE : BLACK} />
-              <Text style={[styles.filterText, artistFilter === "consultations" && styles.filterTextOn]}>
-                Consultations
-              </Text>
+        {activePills.length > 0 && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.pillsScroll}
+            contentContainerStyle={styles.pillsRow}
+          >
+            {activePills.map((p) => (
+              <View key={p.key} style={styles.activePill}>
+                <Text style={styles.activePillText} numberOfLines={1}>
+                  {p.label}
+                </Text>
+                <Pressable onPress={p.onClear} style={styles.pillX} accessibilityLabel={`Remove ${p.label}`}>
+                  <Ionicons name="close" size={14} color={BLACK} />
+                </Pressable>
+              </View>
+            ))}
+
+            <Pressable onPress={clearAllFilters} style={styles.clearAllPill}>
+              <Ionicons name="trash-outline" size={14} color={BLACK} />
+              <Text style={styles.clearAllText}>Clear</Text>
             </Pressable>
-          </View>
+          </ScrollView>
         )}
 
-        {visibleBookings.length === 0 ? (
+        <View style={styles.countRow}>
+          <Text style={styles.resultCount}>
+            Showing <Text style={styles.countStrong}>{pagedBookings.length}</Text> of{" "}
+            <Text style={styles.countStrong}>{filteredBookings.length}</Text>
+          </Text>
+
+          <Pressable
+            onPress={() =>
+              setSortMode((prev) => (prev === "soonest" ? "newest" : prev === "newest" ? "oldest" : "soonest"))
+            }
+            style={styles.sortChip}
+          >
+            <Ionicons name="swap-vertical-outline" size={16} color={BLACK} />
+            <Text style={styles.sortChipText}>{sortLabel(sortMode)}</Text>
+          </Pressable>
+        </View>
+
+        {showEmpty ? (
           <View style={styles.empty}>
-            <Text style={styles.emptyTitle}>No bookings yet</Text>
-            <Text style={styles.emptySub}>Book a service from the marketplace and it’ll show here.</Text>
+            <Text style={styles.emptyTitle}>
+              {searchQuery || statusFilter !== "all" || filterDate || (role === "artist" && artistFilter !== "all")
+                ? "No matches"
+                : "No bookings yet"}
+            </Text>
+            <Text style={styles.emptySub}>
+              {searchQuery || statusFilter !== "all" || filterDate || (role === "artist" && artistFilter !== "all")
+                ? "Try clearing search or adjusting filters."
+                : "Book a service from the marketplace and it’ll show here."}
+            </Text>
           </View>
         ) : (
-          <ScrollView style={{ marginTop: 12 }} contentContainerStyle={{ paddingBottom: 10, gap: 12 }}>
-            {visibleBookings.map((b: any) => {
-              const isPending = b.status === "pending";
-              const isAccepted = b.status === "accepted";
-              const isCancelled = b.status === "cancelled";
-              const isCompleted = b.status === "completed";
+          <ScrollView
+            style={{ marginTop: 12 }}
+            contentContainerStyle={{ paddingBottom: 140, gap: 12 }}
+            showsVerticalScrollIndicator={false}
+          >
+            {groupedBookings.map((g) => {
+              const open = !!expandedGroups[g.id];
 
-              // ✅ ONLY disable consult stuff when booking is cancelled/completed
-              const bookingLive = !isCancelled && !isCompleted;
-
-              const who =
-                role === "artist"
-                  ? bestDisplayName(b.client_profile, "Client")
-                  : bestDisplayName(b.artist_profile, "Artist");
-
-              const when = formatIsoPretty(b.start_time);
-
-              const consultationRequested = hasConsultation(b);
-              const consultStatus = normConsultStatus(b?.consultation_meta?.consult_status);
-              const meta = b?.consultation_meta ?? {};
-
-              const proposedIso: string | null =
-                meta?.proposed_time_iso ??
-                (Array.isArray(meta?.availability) && meta.availability[0] ? String(meta.availability[0]) : null);
-
-              const proposedPretty = proposedIso ? formatIsoPretty(proposedIso) : null;
-
-              const proposedBy = metaProposedBy(meta);
-              const iProposedLast =
-                proposedBy &&
-                ((proposedBy === "client" && role === "client") || (proposedBy === "artist" && role === "artist"));
-
-              // ✅ Accept proposed consult if other side proposed
-              const canAcceptConsult =
-                bookingLive &&
-                !!proposedIso &&
-                consultStatus !== "scheduled" &&
-                consultStatus !== "declined" &&
-                !iProposedLast;
-
-              // ✅ Turn-taking (anti-spam)
-              const canProposeInRequested = consultStatus === "requested" && role === "artist";
-              const canProposeInProposed = consultStatus === "proposed" && !iProposedLast;
-              const canProposeInBlank = consultStatus === "" && role === "artist";
-
-              const canOpenCompose =
-                bookingLive &&
-                consultationRequested &&
-                consultStatus !== "scheduled" &&
-                consultStatus !== "declined" &&
-                (canProposeInRequested || canProposeInProposed || canProposeInBlank);
-
-              const waitingText =
-                consultStatus === "scheduled"
-                  ? "Consultation confirmed."
-                  : consultStatus === "declined"
-                  ? "Consultation declined."
-                  : consultStatus === "proposed"
-                  ? iProposedLast
-                    ? "Waiting for the other person to accept or counter."
-                    : "You can accept, or propose another time."
-                  : consultStatus === "requested"
-                  ? role === "artist"
-                    ? "Client requested a consultation — propose a time."
-                    : "Waiting for the artist to propose a time."
-                  : consultationRequested && role === "client"
-                  ? "Waiting for the artist to propose a time."
-                  : "";
+              const nextItem = [...g.items].sort((a, b) => safeTs(a.start_time) - safeTs(b.start_time))[0];
+              const nextWhen = nextItem?.start_time ? formatIsoPretty(nextItem.start_time) : null;
 
               return (
-                <View key={b.id} style={styles.bookingCard}>
-                  <View style={styles.headerRow}>
+                <View key={g.id} style={styles.groupWrap}>
+                  <Pressable
+                    onPress={() => setExpandedGroups((p) => ({ ...p, [g.id]: !open }))}
+                    style={styles.groupHeader}
+                  >
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.bookingMeta}>
-                        {role === "artist" ? "Client: " : "Artist: "}
-                        <Text style={styles.bookingMetaStrong}>{who}</Text>
-                      </Text>
+                      <Text style={styles.groupTitle}>{g.label}</Text>
+                      {nextWhen ? (
+                        <Text style={styles.groupSub}>
+                          Next: {nextWhen.date} • {nextWhen.time} · {g.items.length} booking
+                          {g.items.length === 1 ? "" : "s"}
+                        </Text>
+                      ) : (
+                        <Text style={styles.groupSub}>
+                          {g.items.length} booking{g.items.length === 1 ? "" : "s"}
+                        </Text>
+                      )}
                     </View>
 
-                    {(isCancelled || isCompleted) && (
-                      <Pressable
-                        disabled={mutatingId === b.id}
-                        onPress={() =>
-                          Alert.alert("Remove from my view?", "This removes it from your view only.", [
-                            { text: "No" },
-                            { text: "Remove", onPress: () => doRemoveForMe(b.id) },
-                          ])
-                        }
-                        style={[styles.iconActionBtn, mutatingId === b.id && styles.disabledBtn]}
+                    <Ionicons name={open ? "chevron-up" : "chevron-down"} size={18} color="rgba(0,0,0,0.65)" />
+                  </Pressable>
+
+                  {open && (
+                    <View style={styles.groupBody}>
+                      <ScrollView
+                        style={{ maxHeight: ACCORDION_MAX_HEIGHT }}
+                        contentContainerStyle={{ gap: 12, paddingBottom: 12 }}
+                        showsVerticalScrollIndicator={true}
+                        nestedScrollEnabled
                       >
-                        <Ionicons name="trash-outline" size={18} color={BLACK} />
-                      </Pressable>
-                    )}
-                  </View>
-
-                  {/* BOOKING REQUEST */}
-                  <View style={styles.sectionCard}>
-                    <View style={styles.sectionTop}>
-                      <Text style={styles.sectionTitle}>Booking request</Text>
-                      <View style={[styles.sectionPill, styles.bookingPill]}>
-                        <Text style={styles.sectionPillText}>{bookingStatusLabel(b.status)}</Text>
-                      </View>
-                    </View>
-
-                    <View style={{ marginTop: 8 }}>
-                      <Text style={styles.dateText}>{when.date}</Text>
-                      <Text style={styles.timeText}>{when.time}</Text>
-                    </View>
-
-                    <View style={[styles.actionRow, { marginTop: 10 }]}>
-                      {role === "artist" && isPending && (
-                        <Pressable
-                          disabled={mutatingId === b.id}
-                          onPress={() => doUpdateStatus(b.id, "accepted")}
-                          style={[styles.primaryBtn, mutatingId === b.id && styles.disabledBtn]}
-                        >
-                          <Ionicons name="checkmark" size={18} color={OFF_WHITE} />
-                          <Text style={styles.primaryBtnText}>Accept booking</Text>
-                        </Pressable>
-                      )}
-
-                      {role === "artist" && (isPending || isAccepted) && (
-                        <Pressable
-                          disabled={mutatingId === b.id}
-                          onPress={() =>
-                            Alert.alert("Cancel booking?", "This will cancel the booking.", [
-                              { text: "No" },
-                              { text: "Yes", onPress: () => doUpdateStatus(b.id, "cancelled") },
-                            ])
-                          }
-                          style={[styles.secondaryBtn, mutatingId === b.id && styles.disabledBtn]}
-                        >
-                          <Ionicons name="close-circle-outline" size={18} color={BLACK} />
-                          <Text style={styles.secondaryBtnText}>Cancel booking</Text>
-                        </Pressable>
-                      )}
-
-                      {role === "artist" && isAccepted && (
-                        <Pressable
-                          disabled={mutatingId === b.id}
-                          onPress={() => doUpdateStatus(b.id, "completed")}
-                          style={[styles.secondaryBtn, mutatingId === b.id && styles.disabledBtn]}
-                        >
-                          <Ionicons name="checkmark-circle-outline" size={18} color={BLACK} />
-                          <Text style={styles.secondaryBtnText}>Mark completed</Text>
-                        </Pressable>
-                      )}
-                    </View>
-
-                    {consultationRequested && (
-                      <Text style={styles.sectionHint}>
-                        Booking acceptance does <Text style={{ fontWeight: "900" }}>not</Text> confirm the consultation.
-                      </Text>
-                    )}
-                  </View>
-
-                  {/* CONSULTATION REQUEST */}
-                  {consultationRequested && (
-                    <View style={styles.sectionCard}>
-                      <View style={styles.sectionTop}>
-                        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                          <Ionicons name="videocam-outline" size={16} color={BLACK} />
-                          <Text style={styles.sectionTitle}>Consultation</Text>
-                        </View>
-                        <View style={[styles.sectionPill, styles.consultPill]}>
-                          <Text style={styles.sectionPillText}>{consultStatusLabel(consultStatus || "requested")}</Text>
-                        </View>
-                      </View>
-
-                      {!bookingLive && (
-                        <Text style={styles.waitingText}>Booking is not live anymore, so consultation actions are disabled.</Text>
-                      )}
-
-                      {!!waitingText && <Text style={styles.waitingText}>{waitingText}</Text>}
-
-                      {proposedPretty && (
-                        <View style={styles.proposedBadge}>
-                          <Ionicons name="time-outline" size={14} color={BLACK} />
-                          <Text style={styles.proposedBadgeText}>
-                            Proposed {proposedBy ? `(${proposedBy})` : ""}: {proposedPretty.date} • {proposedPretty.time}
-                          </Text>
-                        </View>
-                      )}
-
-                      {/* Compose */}
-                      {composeId === b.id && composeValue && bookingLive && (
-                        <View style={styles.proposeBox}>
-                          <View style={styles.proposeHeaderRow}>
-                            <Text style={styles.proposeTitle}>Propose consultation time</Text>
-                            <Pressable onPress={showCalendarHelp} style={styles.infoIconBtn}>
-                              <Ionicons name="information-circle-outline" size={20} color={BLACK} />
-                            </Pressable>
-                          </View>
-
-                          <View style={styles.proposeRow}>
-                            <Pressable onPress={openDate} style={styles.proposeBtn}>
-                              <Ionicons name="calendar-outline" size={16} color={BLACK} />
-                              <Text style={styles.proposeBtnText}>{formatDatePretty(composeValue).date}</Text>
-                            </Pressable>
-
-                            <Pressable onPress={openTime} style={styles.proposeBtn}>
-                              <Ionicons name="time-outline" size={16} color={BLACK} />
-                              <Text style={styles.proposeBtnText}>{formatDatePretty(composeValue).time}</Text>
-                            </Pressable>
-                          </View>
-
-                          <View style={styles.proposeActions}>
-                            <Pressable onPress={closeCompose} style={styles.secondaryBtn}>
-                              <Text style={styles.secondaryBtnText}>Cancel</Text>
-                            </Pressable>
-
-                            <Pressable
-                              disabled={mutatingId === b.id || showDateSheet || showTimeSheet}
-                              onPress={sendProposal}
-                              style={[
-                                styles.primaryBtn,
-                                (mutatingId === b.id || showDateSheet || showTimeSheet) && styles.disabledBtn,
-                              ]}
-                            >
-                              <Text style={styles.primaryBtnText}>Send proposal</Text>
-                            </Pressable>
-                          </View>
-                        </View>
-                      )}
-
-                      {/* Actions */}
-                      <View style={[styles.actionRow, { marginTop: 10 }]}>
-                        {bookingLive && canOpenCompose && composeId !== b.id && (
-                          <Pressable
-                            disabled={mutatingId === b.id}
-                            onPress={() => openCompose(b)}
-                            style={[styles.secondaryBtn, mutatingId === b.id && styles.disabledBtn]}
-                          >
-                            <Ionicons name="time-outline" size={18} color={BLACK} />
-                            <Text style={styles.secondaryBtnText}>
-                              {consultStatus === "proposed" ? "Propose another time" : "Propose consultation time"}
-                            </Text>
-                          </Pressable>
-                        )}
-
-                        {bookingLive && canAcceptConsult && proposedIso && (
-                          <Pressable
-                            disabled={mutatingId === b.id}
-                            onPress={() => acceptProposal(b.id, proposedIso)}
-                            style={[styles.primaryBtn, mutatingId === b.id && styles.disabledBtn]}
-                          >
-                            <Ionicons name="checkmark" size={18} color={OFF_WHITE} />
-                            <Text style={styles.primaryBtnText}>Accept consultation time</Text>
-                          </Pressable>
-                        )}
-
-                        {bookingLive && consultStatus !== "scheduled" && consultStatus !== "declined" && (
-                          <Pressable
-                            disabled={mutatingId === b.id}
-                            onPress={() =>
-                              Alert.alert(
-                                "Decline consultation?",
-                                "This will decline the consultation only. The booking stays the same.",
-                                [
-                                  { text: "No" },
-                                  { text: "Decline", onPress: () => declineConsultation(b.id), style: "destructive" },
-                                ]
-                              )
-                            }
-                            style={[styles.secondaryBtn, mutatingId === b.id && styles.disabledBtn]}
-                          >
-                            <Ionicons name="close-circle-outline" size={18} color={BLACK} />
-                            <Text style={styles.secondaryBtnText}>Decline consultation</Text>
-                          </Pressable>
-                        )}
-                      </View>
+                        {g.items.map((b: any) => (
+                          <View key={b.id}>{renderBookingCard(b)}</View>
+                        ))}
+                      </ScrollView>
                     </View>
                   )}
                 </View>
               );
             })}
+
+            {canLoadMore && (
+              <Pressable
+                onPress={() => setPage((p) => p + 1)}
+                style={[styles.secondaryBtn, { alignSelf: "center", marginTop: 6 }]}
+              >
+                <Ionicons name="add-circle-outline" size={18} color={BLACK} />
+                <Text style={styles.secondaryBtnText}>Load more</Text>
+              </Pressable>
+            )}
           </ScrollView>
         )}
       </View>
 
-      {/* iOS Sheets */}
+      {/* Filters Modal */}
+      <Modal visible={filtersOpen} transparent animationType="fade" onRequestClose={() => setFiltersOpen(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setFiltersOpen(false)}>
+          <Pressable style={styles.modalCard} onPress={() => {}}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Filters</Text>
+              <Pressable onPress={() => setFiltersOpen(false)} style={styles.iconBtn} accessibilityLabel="Close filters">
+                <Ionicons name="close" size={18} color="rgba(0,0,0,0.75)" />
+              </Pressable>
+            </View>
+
+            <Text style={styles.modalSectionTitle}>Quick date</Text>
+            <View style={styles.modalChipsRow}>
+              {(
+                [
+                  ["today", "Today"],
+                  ["this week", "This week"],
+                  ["this month", "This month"],
+                ] as Array<[Parameters<typeof setQuick>[0], string]>
+              ).map(([k, label]) => (
+                <Pressable
+                  key={k}
+                  onPress={() => {
+                    setQuick(k);
+                    setFiltersOpen(false);
+                  }}
+                  style={styles.modalChip}
+                >
+                  <Text style={styles.modalChipText}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={[styles.modalSectionTitle, { marginTop: 14 }]}>Pick a date</Text>
+            <View style={styles.datePickerRow}>
+              <Pressable onPress={openFilterDatePicker} style={styles.datePickerBtn}>
+                <Ionicons name="calendar-outline" size={16} color={BLACK} />
+                <Text style={styles.datePickerBtnText}>{filterDate ? formatDateOnly(filterDate) : "Choose a date"}</Text>
+                <View style={{ flex: 1 }} />
+                {Platform.OS === "ios" && (
+                  <Ionicons name={iosDateOpen ? "chevron-up" : "chevron-down"} size={16} color="rgba(0,0,0,0.6)" />
+                )}
+              </Pressable>
+
+              {!!filterDate && (
+                <Pressable onPress={clearFilterDate} style={styles.dateClearBtn} accessibilityLabel="Clear date filter">
+                  <Ionicons name="close" size={16} color={BLACK} />
+                </Pressable>
+              )}
+            </View>
+
+            {Platform.OS === "ios" && iosDateOpen && (
+              <View style={styles.inlineDateWrap}>
+                <DateTimePicker
+                  value={filterDateDraft}
+                  mode="date"
+                  display="spinner"
+                  onChange={(e: DateTimePickerEvent, picked?: Date) => {
+                    if (e.type === "dismissed") return;
+                    if (!picked) return;
+                    setFilterDateDraft(picked);
+                    commitFilterDate(picked);
+                  }}
+                />
+                <Pressable
+                  onPress={() => setIosDateOpen(false)}
+                  style={[styles.primaryBtn, { alignSelf: "flex-end", marginTop: 10 }]}
+                >
+                  <Text style={styles.primaryBtnText}>Done</Text>
+                </Pressable>
+              </View>
+            )}
+
+            <Text style={[styles.modalSectionTitle, { marginTop: 14 }]}>Status</Text>
+            <View style={styles.modalChipsRow}>
+              {(
+                [
+                  ["all", "All"],
+                  ["pending", "Pending"],
+                  ["accepted", "Accepted"],
+                  ["cancelled", "Cancelled"],
+                  ["completed", "Completed"],
+                ] as Array<[StatusFilter, string]>
+              ).map(([key, label]) => {
+                const on = statusFilter === key;
+                return (
+                  <Pressable key={key} onPress={() => setStatusFilter(key)} style={[styles.modalPill, on && styles.modalPillOn]}>
+                    <Text style={[styles.modalPillText, on && styles.modalPillTextOn]}>{label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {role === "artist" && (
+              <>
+                <Text style={[styles.modalSectionTitle, { marginTop: 14 }]}>Show</Text>
+                <View style={styles.modalChipsRow}>
+                  {(
+                    [
+                      ["all", "All bookings"],
+                      ["consultations", "Consultations only"],
+                    ] as Array<[ArtistFilter, string]>
+                  ).map(([key, label]) => {
+                    const on = artistFilter === key;
+                    return (
+                      <Pressable key={key} onPress={() => setArtistFilter(key)} style={[styles.modalPill, on && styles.modalPillOn]}>
+                        <Text style={[styles.modalPillText, on && styles.modalPillTextOn]}>{label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            <Text style={[styles.modalSectionTitle, { marginTop: 14 }]}>Order</Text>
+            <View style={styles.modalChipsRow}>
+              {(
+                [
+                  ["soonest", "Next up"],
+                  ["newest", "Recently added"],
+                  ["oldest", "Oldest first"],
+                ] as Array<[SortMode, string]>
+              ).map(([key, label]) => {
+                const on = sortMode === key;
+                return (
+                  <Pressable
+                    key={key}
+                    onPress={() => setSortMode(key)}
+                    style={[styles.modalPill, on && styles.modalPillOn]}
+                  >
+                    <Text style={[styles.modalPillText, on && styles.modalPillTextOn]}>{label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={styles.modalFooter}>
+              <Pressable onPress={clearAllFilters} style={styles.modalSecondary}>
+                <Ionicons name="trash-outline" size={16} color={BLACK} />
+                <Text style={styles.modalSecondaryText}>Clear all</Text>
+              </Pressable>
+
+              <Pressable onPress={() => setFiltersOpen(false)} style={styles.modalPrimary}>
+                <Text style={styles.modalPrimaryText}>Done</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Android pickers (consultation) */}
+      {Platform.OS !== "ios" && showDateSheet && draftValue && (
+        <DateTimePicker
+          value={draftValue}
+          mode="date"
+          display="calendar"
+          onChange={onAndroidDateChange}
+        />
+      )}
+      {Platform.OS !== "ios" && showTimeSheet && draftValue && (
+       <DateTimePicker
+          value={draftValue}
+          mode="time"
+          display="spinner"
+          onChange={onAndroidTimeChange}
+        />)}
+      {/* Android picker (filters date) */}
+      {Platform.OS !== "ios" && showAndroidFilterDate && (
+        <DateTimePicker value={filterDateDraft} mode="date" display="calendar" onChange={onAndroidFilterDateChange} />
+      )}
+
+      {/* iOS Sheets (consultation) */}
       {composeId && composeValue && draftValue && (
         <>
           <PickerSheet
@@ -922,8 +1508,23 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
             mode="date"
             value={draftValue}
             onChangeValue={(picked) => setDraftValue((prev) => (prev ? applyPickedDate(prev, picked) : picked))}
-            onCancel={cancelDraft}
-            onDone={commitDraft}
+            onCancel={() => {
+              setDraftValue(composeValue);
+              setShowDateSheet(false);
+              setShowTimeSheet(false);
+            }}
+            onDone={() => {
+              if (!composeBookingStartIso || !draftValue) return;
+              const bookingStart = new Date(composeBookingStartIso);
+              const clamped = snapToMinuteStep(
+                clampConsultationToRules(draftValue, bookingStart, composeAllowSameDay),
+                5
+              );
+              setComposeValue(clamped);
+              setDraftValue(clamped);
+              setShowDateSheet(false);
+              setShowTimeSheet(false);
+            }}
           />
           <PickerSheet
             title="Pick a time"
@@ -932,13 +1533,26 @@ export default function BookingsScreen({ onBack }: { onBack: () => void }) {
             value={draftValue}
             minuteInterval={5}
             onChangeValue={(picked) => setDraftValue((prev) => (prev ? applyPickedTime(prev, picked) : picked))}
-            onCancel={cancelDraft}
-            onDone={commitDraft}
+            onCancel={() => {
+              setDraftValue(composeValue);
+              setShowDateSheet(false);
+              setShowTimeSheet(false);
+            }}
+            onDone={() => {
+              if (!composeBookingStartIso || !draftValue) return;
+              const bookingStart = new Date(composeBookingStartIso);
+              const clamped = snapToMinuteStep(
+                clampConsultationToRules(draftValue, bookingStart, composeAllowSameDay),
+                5
+              );
+              setComposeValue(clamped);
+              setDraftValue(clamped);
+              setShowDateSheet(false);
+              setShowTimeSheet(false);
+            }}
           />
         </>
       )}
-
-      <View style={{ height: 90 }} />
     </SafeAreaView>
   );
 }
@@ -958,16 +1572,33 @@ const styles = StyleSheet.create({
     height: 44,
     marginBottom: 12,
   },
+  sectionHintInline: {
+    flex: 1,
+    color: "rgba(0,0,0,0.55)",
+    fontWeight: "800",
+    fontSize: 12,
+  },
 
   iconBtn: {
     width: 36,
     height: 36,
-    borderRadius: 10,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.4)",
+    backgroundColor: "rgba(255,255,255,0.85)",
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.06)",
+  },
+
+  filterBtnTop: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: PINK,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
   },
 
   h1: { fontSize: 22, fontWeight: "900", color: BLACK },
@@ -975,8 +1606,95 @@ const styles = StyleSheet.create({
 
   fullCenter: { flex: 1, alignItems: "center", justifyContent: "center" },
 
-  filterRow: { flexDirection: "row", gap: 10, marginTop: 12 },
-  filterPill: {
+  searchBox: {
+    marginTop: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: "rgba(0,0,0,0.02)",
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === "ios" ? 12 : 10,
+  },
+  searchInput: { flex: 1, fontWeight: "800", color: BLACK, paddingVertical: 0 },
+  clearBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.06)",
+  },
+
+  tipText: { marginTop: 8, color: "rgba(0,0,0,0.50)", fontWeight: "700", fontSize: 12 },
+  tipStrong: { fontWeight: "900", color: BLACK },
+
+  pillsScroll: { marginTop: 10, maxHeight: 44 },
+  pillsRow: { flexDirection: "row", gap: 10, paddingVertical: 2, alignItems: "center" },
+
+  hintRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+
+  deleteInlineBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(0,0,0,0.04)",
+  },
+
+
+  activePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    maxWidth: 280,
+    paddingLeft: 12,
+    paddingRight: 6,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(0,0,0,0.04)",
+  },
+  activePillText: { fontWeight: "900", color: BLACK, fontSize: 12, maxWidth: 220 },
+  pillX: {
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.9)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.06)",
+  },
+  clearAllPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: PINK,
+  },
+  clearAllText: { fontWeight: "900", color: BLACK, fontSize: 12 },
+
+  countRow: { marginTop: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  resultCount: { color: "rgba(0,0,0,0.45)", fontWeight: "800", fontSize: 12 },
+  countStrong: { fontWeight: "900", color: BLACK },
+  sortChip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
@@ -987,28 +1705,40 @@ const styles = StyleSheet.create({
     borderColor: BORDER,
     backgroundColor: OFF_WHITE,
   },
-  filterPillOn: { backgroundColor: BLACK, borderColor: "rgba(0,0,0,0.20)" },
-  filterText: { fontWeight: "900", color: BLACK },
-  filterTextOn: { color: OFF_WHITE },
+  sortChipText: { fontWeight: "900", color: BLACK, fontSize: 12 },
 
   empty: { marginTop: 12, borderRadius: 16, backgroundColor: PINK, padding: 14 },
   emptyTitle: { fontWeight: "900", color: BLACK },
   emptySub: { marginTop: 6, fontWeight: "700", color: MUTED },
 
+  groupWrap: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.06)",
+    backgroundColor: OFF_WHITE,
+    padding: 12,
+  },
+  groupHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+  },
+  groupTitle: { fontWeight: "900", color: BLACK, fontSize: 15 },
+  groupSub: { marginTop: 4, fontWeight: "700", color: "rgba(0,0,0,0.55)", fontSize: 12 },
+  groupBody: {
+    marginTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(0,0,0,0.06)",
+    paddingTop: 10,
+  },
+
   bookingCard: {
     borderRadius: 18,
     backgroundColor: OFF_WHITE,
-    padding: 14,
-    gap: 12,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.06)",
+    gap: 12
   },
-
-  headerRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 10 },
-
-  bookingMeta: { color: MUTED, fontWeight: "800" },
-  bookingMetaStrong: { color: BLACK, fontWeight: "900" },
-  smallMuted: { marginTop: 4, color: "rgba(0,0,0,0.45)", fontWeight: "800", fontSize: 12 },
 
   sectionCard: {
     backgroundColor: CARD_BG,
@@ -1020,6 +1750,9 @@ const styles = StyleSheet.create({
   sectionTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   sectionTitle: { fontWeight: "900", color: BLACK },
 
+  // ✅ right side of booking header: status pill + overflow menu
+  sectionRightRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+
   sectionPill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6, alignSelf: "flex-start" },
   bookingPill: { backgroundColor: PINK },
   consultPill: { backgroundColor: "rgba(0,0,0,0.06)" },
@@ -1030,18 +1763,26 @@ const styles = StyleSheet.create({
 
   sectionHint: { marginTop: 10, color: "rgba(0,0,0,0.55)", fontWeight: "800", fontSize: 12 },
 
+  // ✅ proposed badge now stretches and wraps (no overflow)
   proposedBadge: {
     flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
+    alignItems: "flex-start",
+    gap: 8,
     marginTop: 10,
     backgroundColor: "rgba(0,0,0,0.05)",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignSelf: "flex-start",
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignSelf: "stretch",
   },
-  proposedBadgeText: { fontWeight: "900", fontSize: 12, color: BLACK },
+  proposedBadgeText: {
+    flex: 1,
+    fontWeight: "900",
+    fontSize: 12,
+    color: BLACK,
+    flexWrap: "wrap",
+    lineHeight: 16,
+  },
 
   waitingText: { marginTop: 10, color: MUTED, fontWeight: "800", fontSize: 12 },
 
@@ -1051,7 +1792,7 @@ const styles = StyleSheet.create({
   infoIconBtn: {
     width: 34,
     height: 34,
-    borderRadius: 10,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
@@ -1106,9 +1847,9 @@ const styles = StyleSheet.create({
   },
   secondaryBtnText: { color: BLACK, fontWeight: "900" },
 
-  iconActionBtn: {
-    width: 42,
-    height: 42,
+  iconActionBtnSmall: {
+    width: 38,
+    height: 38,
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
@@ -1130,5 +1871,100 @@ const styles = StyleSheet.create({
   sheetHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
   sheetTitle: { fontSize: 14, fontWeight: "900", color: BLACK },
   sheetActions: { flexDirection: "row", justifyContent: "space-between", gap: 10, marginTop: 10 },
+
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", justifyContent: "flex-end", padding: 12 },
+  modalCard: {
+    backgroundColor: OFF_WHITE,
+    borderRadius: 20,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+  },
+  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  modalTitle: { fontSize: 16, fontWeight: "900", color: BLACK },
+  modalSectionTitle: { fontWeight: "900", color: BLACK, marginTop: 6 },
+  modalChipsRow: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 10 },
+
+  modalChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 999,
+    backgroundColor: OFF_WHITE,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.06)",
+  },
+  modalChipText: { fontWeight: "900", color: BLACK, fontSize: 12 },
+
+  modalPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: OFF_WHITE,
+  },
+  modalPillOn: { backgroundColor: BLACK, borderColor: "rgba(0,0,0,0.20)" },
+  modalPillText: { fontWeight: "900", color: BLACK, fontSize: 12 },
+  modalPillTextOn: { color: OFF_WHITE },
+
+  datePickerRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 10 },
+  datePickerBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: OFF_WHITE,
+  },
+  datePickerBtnText: { fontWeight: "900", color: BLACK, fontSize: 12 },
+  dateClearBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: "rgba(0,0,0,0.04)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  inlineDateWrap: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+    backgroundColor: "rgba(0,0,0,0.03)",
+  },
+
+  modalFooter: { flexDirection: "row", gap: 10, justifyContent: "space-between", marginTop: 16 },
+  modalSecondary: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: OFF_WHITE,
+    flex: 1,
+    justifyContent: "center",
+  },
+  modalSecondaryText: { fontWeight: "900", color: BLACK },
+  modalPrimary: {
+    flex: 1,
+    backgroundColor: BLACK,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  modalPrimaryText: { fontWeight: "900", color: OFF_WHITE },
 });
 

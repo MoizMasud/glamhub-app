@@ -86,6 +86,7 @@ export async function createBooking(input: {
   serviceId: string;
   artistId: string;
   startTimeISO: string;
+  endTimeISO: string; // ✅ NEW (explicit end time)
   notes?: string;
   consultation_meta?: ConsultationMeta;
 }) {
@@ -102,6 +103,7 @@ export async function createBooking(input: {
         artist_id: input.artistId,
         client_id: user.id,
         start_time: input.startTimeISO,
+        end_time: input.endTimeISO, // ✅ NEW
         notes: input.notes ?? null,
         status: "pending",
         consultation_meta: input.consultation_meta ?? null,
@@ -113,6 +115,7 @@ export async function createBooking(input: {
   if (error) throw error;
   return normalizeBookingRow(data);
 }
+
 
 export async function listMyBookings() {
   const {

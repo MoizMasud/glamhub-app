@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
+// SettingsScreen.tsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -11,8 +12,10 @@ import {
   Alert,
   Switch,
   TextInput,
+  ScrollView,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import DateTimePickerModal from "react-native-modal-datetime-picker";
 import { supabase } from "../lib/supabase";
 
 const PINK = "#f9dfdd";
@@ -20,27 +23,171 @@ const BLACK = "#000000";
 const OFF_WHITE = "#FFFFFF";
 
 const MUTED = "rgba(0,0,0,0.60)";
-const BORDER = "rgba(0,0,0,0.12)";
+const SOFT = "rgba(0,0,0,0.05)";
 
 type ConsultationType = "zoom" | "google_meet";
+
+type TimeOffRow = {
+  id: string;
+  artist_id: string;
+  start_date: string | null;
+  end_date: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  all_day: boolean;
+  note: string | null;
+  created_at?: string | null;
+};
+
+function isValidDate(d: any): d is Date {
+  return d instanceof Date && !isNaN(d.getTime());
+}
+
+function startOfDay(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function endOfDay(d: Date) {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+
+function clampToFuture(d: Date) {
+  const now = new Date();
+  return d.getTime() < now.getTime() ? now : d;
+}
+
+function ensureEndAfterStart(start: Date, end: Date) {
+  if (end.getTime() < start.getTime()) return new Date(start);
+  return end;
+}
+
+/** ✅ Always includes year */
+function formatDatePretty(d: Date) {
+  return d.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatTimePretty(d: Date) {
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function toISO(d: Date) {
+  return d.toISOString();
+}
+
+function toDateOnlyISO(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * ✅ Safe parser: prevents "1969/1970" from epoch when strings are null/empty/invalid.
+ * If invalid, returns null (caller can fallback).
+ */
+function parseISOOrNull(iso: string | null | undefined): Date | null {
+  if (!iso || typeof iso !== "string") return null;
+  const t = iso.trim();
+  if (!t) return null;
+
+  const d = new Date(t);
+  if (!isValidDate(d)) return null;
+
+  // guard against epoch-ish junk showing as 1969/1970
+  if (d.getFullYear() < 2000) return null;
+
+  return d;
+}
+
+type PickerTarget = "startDate" | "startTime" | "endDate" | "endTime" | null;
 
 export default function SettingsScreen({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  // existing
   const [autoCleanup, setAutoCleanup] = useState(false);
 
-  // ✅ artist role
   const [role, setRole] = useState<string>("client");
+  const isArtist = useMemo(() => role === "artist", [role]);
 
-  // ✅ consultation settings
+  // Consultation settings
   const [consultEnabled, setConsultEnabled] = useState(false);
   const [consultType, setConsultType] = useState<ConsultationType>("zoom");
   const [consultLink, setConsultLink] = useState("");
   const [consultDirty, setConsultDirty] = useState(false);
 
-  const isArtist = useMemo(() => role === "artist", [role]);
+  // Time off
+  const [timeOffLoading, setTimeOffLoading] = useState(false);
+  const [timeOff, setTimeOff] = useState<TimeOffRow[]>([]);
+  const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
+
+  const [allDay, setAllDay] = useState(true);
+  const [addStart, setAddStart] = useState<Date | null>(null);
+  const [addEnd, setAddEnd] = useState<Date | null>(null);
+  const [addNote, setAddNote] = useState("");
+
+  const [pickerTarget, setPickerTarget] = useState<PickerTarget>(null);
+
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const saveProfilePatch = async (patch: Record<string, any>) => {
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) throw new Error("Not signed in");
+
+    const { error } = await supabase.from("profiles").update(patch).eq("id", auth.user.id);
+    if (error) throw error;
+  };
+
+  const loadTimeOff = async () => {
+    try {
+      setTimeOffLoading(true);
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) throw new Error("Not signed in");
+
+      const { data, error } = await supabase
+        .from("artist_time_off")
+        .select("id, artist_id, start_date, end_date, start_time, end_time, all_day, note, created_at")
+        .eq("artist_id", auth.user.id)
+        .order("start_time", { ascending: false })
+        .limit(50);
+
+      if (error) throw error;
+
+      const normalized: TimeOffRow[] = (data ?? []).map((r: any) => ({
+        id: String(r.id),
+        artist_id: String(r.artist_id),
+        start_date: r.start_date ?? null,
+        end_date: r.end_date ?? null,
+        start_time: r.start_time ?? null,
+        end_time: r.end_time ?? null,
+        all_day: !!r.all_day,
+        note: r.note ?? null,
+        created_at: r.created_at ?? null,
+      }));
+
+      if (mountedRef.current) setTimeOff(normalized);
+    } catch (e: any) {
+      Alert.alert("Time off", e?.message ?? "Failed to load time off.");
+      if (mountedRef.current) setTimeOff([]);
+    } finally {
+      if (mountedRef.current) setTimeOffLoading(false);
+    }
+  };
 
   const load = async () => {
     try {
@@ -56,31 +203,30 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
 
       if (error) throw error;
 
-      setRole((data?.role ?? "client") as string);
-
+      const nextRole = (data?.role ?? "client") as string;
+      setRole(nextRole);
       setAutoCleanup(!!data?.auto_cleanup_bookings);
 
       setConsultEnabled(!!data?.consultation_enabled);
-
       const ct = (data?.consultation_type ?? "zoom") as any;
       setConsultType(ct === "google_meet" ? "google_meet" : "zoom");
-
       setConsultLink((data?.consultation_link ?? "") as string);
       setConsultDirty(false);
+
+      if (nextRole === "artist") {
+        await loadTimeOff();
+      }
     } catch (e: any) {
-      Alert.alert("Error", e.message);
+      Alert.alert("Error", e?.message ?? "Failed to load settings.");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   };
 
-  const saveProfilePatch = async (patch: Record<string, any>) => {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) throw new Error("Not signed in");
-
-    const { error } = await supabase.from("profiles").update(patch).eq("id", auth.user.id);
-    if (error) throw error;
-  };
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onToggleAutoCleanup = (nextValue: boolean) => {
     if (!autoCleanup && nextValue) {
@@ -91,16 +237,15 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
           { text: "Cancel", style: "cancel" },
           {
             text: "Enable",
-            style: "default",
             onPress: async () => {
               try {
                 setSaving(true);
                 await saveProfilePatch({ auto_cleanup_bookings: true });
-                setAutoCleanup(true);
+                if (mountedRef.current) setAutoCleanup(true);
               } catch (e: any) {
-                Alert.alert("Save failed", e.message);
+                Alert.alert("Error", e?.message ?? "Failed to save.");
               } finally {
-                setSaving(false);
+                if (mountedRef.current) setSaving(false);
               }
             },
           },
@@ -112,59 +257,12 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
     (async () => {
       try {
         setSaving(true);
-        await saveProfilePatch({ auto_cleanup_bookings: false });
-        setAutoCleanup(false);
+        await saveProfilePatch({ auto_cleanup_bookings: nextValue });
+        if (mountedRef.current) setAutoCleanup(nextValue);
       } catch (e: any) {
-        Alert.alert("Save failed", e.message);
+        Alert.alert("Error", e?.message ?? "Failed to save.");
       } finally {
-        setSaving(false);
-      }
-    })();
-  };
-
-  const onToggleConsult = (nextValue: boolean) => {
-    if (!consultEnabled && nextValue) {
-      Alert.alert(
-        "Enable consultations?",
-        "When enabled, clients will see your Zoom/Google Meet link on your profile so they can schedule a consultation before booking.",
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Enable",
-            style: "default",
-            onPress: async () => {
-              try {
-                setSaving(true);
-                await saveProfilePatch({
-                  consultation_enabled: true,
-                  consultation_type: consultType,
-                  consultation_link: consultLink.trim() || null,
-                });
-                setConsultEnabled(true);
-                setConsultDirty(false);
-              } catch (e: any) {
-                Alert.alert("Save failed", e.message);
-              } finally {
-                setSaving(false);
-              }
-            },
-          },
-        ]
-      );
-      return;
-    }
-
-    // turning OFF
-    (async () => {
-      try {
-        setSaving(true);
-        await saveProfilePatch({ consultation_enabled: false });
-        setConsultEnabled(false);
-        setConsultDirty(false);
-      } catch (e: any) {
-        Alert.alert("Save failed", e.message);
-      } finally {
-        setSaving(false);
+        if (mountedRef.current) setSaving(false);
       }
     })();
   };
@@ -172,22 +270,184 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
   const saveConsultDetails = async () => {
     try {
       setSaving(true);
+      await saveProfilePatch({
+        consultation_enabled: consultEnabled,
+        consultation_type: consultType,
+        consultation_link: consultLink.trim() || null,
+      });
+      if (mountedRef.current) setConsultDirty(false);
+      Alert.alert("Saved", "Consultation settings updated.");
+    } catch (e: any) {
+      Alert.alert("Error", e?.message ?? "Failed to save consultation settings.");
+    } finally {
+      if (mountedRef.current) setSaving(false);
+    }
+  };
 
-      if (consultEnabled && !consultLink.trim()) {
-        Alert.alert("Missing link", "Please paste your Zoom/Google Meet link.");
+  const ensureDefaults = () => {
+    // ✅ No epoch defaults; always start from "now" if state empty
+    const now = clampToFuture(new Date());
+
+    const s = addStart && isValidDate(addStart) ? addStart : now;
+
+    let e =
+      addEnd && isValidDate(addEnd)
+        ? addEnd
+        : new Date(s.getTime() + 60 * 60 * 1000); // default +1h
+
+    if (allDay) {
+      const sd = startOfDay(s);
+      const ed = endOfDay(e);
+      return { start: sd, end: ensureEndAfterStart(sd, ed) };
+    }
+
+    e = ensureEndAfterStart(s, e);
+    return { start: s, end: e };
+  };
+
+  const openPicker = (target: PickerTarget) => {
+    const { start, end } = ensureDefaults();
+    setAddStart(start);
+    setAddEnd(end);
+    setPickerTarget(target);
+  };
+
+  const closePicker = () => setPickerTarget(null);
+
+  const applyPickedDate = (picked: Date) => {
+    if (!isValidDate(picked)) return;
+    const { start, end } = ensureDefaults();
+
+    if (pickerTarget === "startDate") {
+      setAddStart(() => {
+        const next = new Date(start);
+        next.setFullYear(picked.getFullYear(), picked.getMonth(), picked.getDate());
+        return allDay ? startOfDay(next) : next;
+      });
+      return;
+    }
+
+    if (pickerTarget === "endDate") {
+      setAddEnd(() => {
+        const next = new Date(end);
+        next.setFullYear(picked.getFullYear(), picked.getMonth(), picked.getDate());
+        return allDay ? endOfDay(next) : next;
+      });
+      return;
+    }
+
+    if (pickerTarget === "startTime") {
+      setAddStart(() => {
+        const next = new Date(start);
+        next.setHours(picked.getHours(), picked.getMinutes(), 0, 0);
+        return clampToFuture(next);
+      });
+      return;
+    }
+
+    if (pickerTarget === "endTime") {
+      setAddEnd(() => {
+        const next = new Date(end);
+        next.setHours(picked.getHours(), picked.getMinutes(), 0, 0);
+        return next;
+      });
+      return;
+    }
+  };
+
+  useEffect(() => {
+    if (!allDay) return;
+    setAddStart((prev) => (prev && isValidDate(prev) ? startOfDay(prev) : prev));
+    setAddEnd((prev) => (prev && isValidDate(prev) ? endOfDay(prev) : prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allDay]);
+
+  useEffect(() => {
+    if (!addStart || !isValidDate(addStart)) return;
+    setAddEnd((prev) => {
+      const nowEnd = prev && isValidDate(prev) ? prev : new Date(addStart.getTime() + 60 * 60 * 1000);
+      let next = new Date(nowEnd);
+      if (allDay) next = endOfDay(next);
+      if (next.getTime() < addStart.getTime()) {
+        next = allDay ? endOfDay(addStart) : new Date(addStart.getTime() + 60 * 60 * 1000);
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addStart?.getTime()]);
+
+  const addTimeOffRange = async () => {
+    try {
+      setSaving(true);
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) throw new Error("Not signed in");
+
+      const { start, end } = ensureDefaults();
+      if (end.getTime() < start.getTime()) {
+        Alert.alert("Invalid range", "End must be after start.");
         return;
       }
 
-      await saveProfilePatch({
-        consultation_type: consultType,
-        consultation_link: consultEnabled ? consultLink.trim() : null,
-      });
+      const startDate = toDateOnlyISO(start);
+      const endDate = toDateOnlyISO(end);
 
-      setConsultDirty(false);
+      const { error } = await supabase.from("artist_time_off").insert([
+        {
+          artist_id: auth.user.id,
+          start_date: startDate,
+          end_date: endDate,
+          start_time: toISO(start),
+          end_time: toISO(end),
+          all_day: allDay,
+          note: addNote.trim() || null,
+        },
+      ]);
+
+      if (error) throw error;
+
+      if (mountedRef.current) {
+        setAddStart(null);
+        setAddEnd(null);
+        setAddNote("");
+      }
+
+      await loadTimeOff();
+      Alert.alert("Saved", "Time off added.");
     } catch (e: any) {
-      Alert.alert("Save failed", e.message);
+      Alert.alert("Time off", e?.message ?? "Failed to add time off.");
     } finally {
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
+    }
+  };
+
+  const deleteTimeOff = async (row: TimeOffRow) => {
+    if (deletingIds[row.id]) return;
+
+    try {
+      setDeletingIds((p) => ({ ...p, [row.id]: true }));
+
+      // ✅ Close picker if open (defensive)
+      if (pickerTarget) closePicker();
+
+      // ✅ Let UI breathe (prevents “freeze” feel)
+      await new Promise((res) => setTimeout(res, 0));
+
+      const { error } = await supabase.from("artist_time_off").delete().eq("id", row.id);
+      if (error) throw error;
+
+      if (mountedRef.current) {
+        setTimeOff((prev) => prev.filter((r) => r.id !== row.id));
+      }
+    } catch (e: any) {
+      Alert.alert("Time off", e?.message ?? "Failed to delete.");
+    } finally {
+      if (mountedRef.current) {
+        setDeletingIds((p) => {
+          const next = { ...p };
+          delete next[row.id];
+          return next;
+        });
+      }
     }
   };
 
@@ -200,37 +460,43 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
           setConsultDirty(true);
         }}
         style={[styles.typePill, on && styles.typePillOn]}
-        accessibilityRole="button"
       >
         <Text style={[styles.typePillText, on && styles.typePillTextOn]}>{label}</Text>
       </Pressable>
     );
   };
 
-  useEffect(() => {
-    load();
-  }, []);
+  const startLabel = addStart
+    ? allDay
+      ? `Start: ${formatDatePretty(addStart)}`
+      : `Start: ${formatDatePretty(addStart)} • ${formatTimePretty(addStart)}`
+    : "Choose start";
+
+  const endLabel = addEnd
+    ? allDay
+      ? `End: ${formatDatePretty(addEnd)}`
+      : `End: ${formatDatePretty(addEnd)} • ${formatTimePretty(addEnd)}`
+    : "Choose end";
+
+  const { start: safeStart, end: safeEnd } = ensureDefaults();
+
+  const pickerMode = pickerTarget?.includes("Time") ? "time" : "date";
+  const pickerValue =
+    pickerTarget === "startDate" || pickerTarget === "startTime"
+      ? safeStart
+      : pickerTarget === "endDate" || pickerTarget === "endTime"
+      ? safeEnd
+      : safeStart;
 
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
-        {/* Header */}
         <View style={styles.topBar}>
-          <Pressable onPress={onBack} style={styles.iconBtn} accessibilityRole="button">
-            <Ionicons name="chevron-back" size={22} color={"rgba(0,0,0,0.75)"} />
+          <Pressable onPress={onBack} style={styles.iconBtn}>
+            <Ionicons name="chevron-back" size={20} color={BLACK} />
           </Pressable>
-
           <Text style={styles.h1}>Settings</Text>
-
-          <Pressable
-            onPress={load}
-            style={[styles.iconBtn, (loading || saving) && { opacity: 0.6 }]}
-            disabled={loading || saving}
-            accessibilityRole="button"
-            accessibilityLabel="Refresh settings"
-          >
-            <Ionicons name="refresh" size={20} color={"rgba(0,0,0,0.75)"} />
-          </Pressable>
+          <View style={{ width: 36 }} />
         </View>
 
         {loading ? (
@@ -238,45 +504,46 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
             <ActivityIndicator />
           </View>
         ) : (
-          <>
-            {/* Booking history */}
+          <ScrollView contentContainerStyle={styles.scrollContent}>
+            {/* Auto cleanup */}
             <View style={styles.card}>
-              <Text style={styles.sectionTitle}>Booking history</Text>
-              <Text style={styles.help}>
-                Choose whether cancelled/completed bookings should be removed from your view automatically.
-              </Text>
+              <Text style={styles.sectionTitle}>Bookings</Text>
 
               <View style={styles.settingRow}>
-                <View style={{ flex: 1, paddingRight: 12 }}>
-                  <Text style={styles.rowTitle}>Auto-remove after 24 hours</Text>
-                  <Text style={styles.rowSub}>Applies only to your view (the other person may still see it).</Text>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={styles.rowTitle}>Auto-remove old bookings</Text>
+                  <Text style={styles.rowSub}>Hide cancelled/completed bookings from your view after 24 hours.</Text>
                 </View>
-
                 <Switch value={autoCleanup} onValueChange={onToggleAutoCleanup} disabled={saving} />
               </View>
 
               {saving && <Text style={styles.savingText}>Saving…</Text>}
             </View>
 
-            {/* ✅ Consultation settings (artists only) */}
+            {/* Consultation (artists only) */}
             {isArtist && (
               <View style={styles.card}>
                 <Text style={styles.sectionTitle}>Consultations</Text>
-                <Text style={styles.help}>
-                  If enabled, clients can use your Zoom/Google Meet link for a quick consultation before booking.
-                </Text>
+                <Text style={styles.help}>Enable consultations and share a link (Zoom or Google Meet).</Text>
 
                 <View style={styles.settingRow}>
-                  <View style={{ flex: 1, paddingRight: 12 }}>
-                    <Text style={styles.rowTitle}>Enable consultation link</Text>
-                    <Text style={styles.rowSub}>Shows a consultation button on your public profile.</Text>
+                  <View style={{ flex: 1, paddingRight: 10 }}>
+                    <Text style={styles.rowTitle}>Enable consultations</Text>
+                    <Text style={styles.rowSub}>Let clients request/schedule a consultation before the appointment.</Text>
                   </View>
-
-                  <Switch value={consultEnabled} onValueChange={onToggleConsult} disabled={saving} />
+                  <Switch
+                    value={consultEnabled}
+                    onValueChange={(v) => {
+                      setConsultEnabled(v);
+                      setConsultDirty(true);
+                    }}
+                    disabled={saving}
+                  />
                 </View>
 
                 {consultEnabled && (
                   <>
+                    <Text style={styles.label}>Consultation type</Text>
                     <View style={styles.typeRow}>
                       <TypePill label="Zoom" value="zoom" />
                       <TypePill label="Google Meet" value="google_meet" />
@@ -298,7 +565,6 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
                       onPress={saveConsultDetails}
                       disabled={saving || !consultDirty}
                       style={[styles.primaryBtn, (!consultDirty || saving) && { opacity: 0.55 }]}
-                      accessibilityRole="button"
                     >
                       <Text style={styles.primaryBtnText}>{saving ? "Saving..." : "Save consultation settings"}</Text>
                     </Pressable>
@@ -306,9 +572,153 @@ export default function SettingsScreen({ onBack }: { onBack: () => void }) {
                 )}
               </View>
             )}
-          </>
+
+            {/* Time off (artists only) */}
+            {isArtist && (
+              <View style={styles.card}>
+                <Text style={styles.sectionTitle}>Time off</Text>
+                <Text style={styles.help}>
+                  Block full days (vacation) or specific hours. Clients won’t be able to book any time that overlaps.
+                </Text>
+
+                <View style={[styles.settingRow, { flexDirection: "column", alignItems: "stretch", gap: 10 }]}>
+                  <View style={[styles.settingRow, { marginTop: 0 }]}>
+                    <View style={{ flex: 1, paddingRight: 10 }}>
+                      <Text style={styles.rowTitle}>All day</Text>
+                      <Text style={styles.rowSub}>Turn off to block specific hours instead of the full day.</Text>
+                    </View>
+                    <Switch value={allDay} onValueChange={setAllDay} disabled={saving} />
+                  </View>
+
+                  <Pressable onPress={() => openPicker("startDate")} style={styles.pickerRow}>
+                    <Text style={styles.pickerText}>{startLabel}</Text>
+                    <Ionicons name="calendar-outline" size={18} color={"rgba(0,0,0,0.65)"} />
+                  </Pressable>
+
+                  {!allDay && (
+                    <Pressable onPress={() => openPicker("startTime")} style={styles.pickerRow}>
+                      <Text style={styles.pickerText}>
+                        {addStart ? `Start time: ${formatTimePretty(addStart)}` : "Choose start time"}
+                      </Text>
+                      <Ionicons name="time-outline" size={18} color={"rgba(0,0,0,0.65)"} />
+                    </Pressable>
+                  )}
+
+                  <Pressable onPress={() => openPicker("endDate")} style={styles.pickerRow}>
+                    <Text style={styles.pickerText}>{endLabel}</Text>
+                    <Ionicons name="calendar-outline" size={18} color={"rgba(0,0,0,0.65)"} />
+                  </Pressable>
+
+                  {!allDay && (
+                    <Pressable onPress={() => openPicker("endTime")} style={styles.pickerRow}>
+                      <Text style={styles.pickerText}>
+                        {addEnd ? `End time: ${formatTimePretty(addEnd)}` : "Choose end time"}
+                      </Text>
+                      <Ionicons name="time-outline" size={18} color={"rgba(0,0,0,0.65)"} />
+                    </Pressable>
+                  )}
+
+                  <TextInput
+                    value={addNote}
+                    onChangeText={setAddNote}
+                    style={styles.input}
+                    placeholder="Optional note (private)"
+                  />
+
+                  <Pressable
+                    onPress={addTimeOffRange}
+                    disabled={saving || !addStart || !addEnd}
+                    style={[styles.primaryBtn, (saving || !addStart || !addEnd) && { opacity: 0.55 }]}
+                  >
+                    <Text style={styles.primaryBtnText}>{saving ? "Saving..." : "Add time off"}</Text>
+                  </Pressable>
+                </View>
+
+                <View style={{ marginTop: 10 }}>
+                  <Text style={[styles.rowTitle, { marginBottom: 6 }]}>Your blocked times</Text>
+
+                  {timeOffLoading ? (
+                    <ActivityIndicator />
+                  ) : timeOff.length === 0 ? (
+                    <Text style={styles.rowSub}>No time off added yet.</Text>
+                  ) : (
+                    <View style={{ gap: 8 }}>
+                      {timeOff.map((r) => {
+                        const s = parseISOOrNull(r.start_time) ?? new Date();
+                        const e =
+                          parseISOOrNull(r.end_time) ??
+                          (r.all_day ? endOfDay(s) : new Date(s.getTime() + 60 * 60 * 1000));
+
+                        const isAllDayRow = !!r.all_day;
+                        const isDeleting = !!deletingIds[r.id];
+
+                        return (
+                          <View key={r.id} style={styles.timeOffRow}>
+                            <View style={{ flex: 1, paddingRight: 10 }}>
+                              <Text style={styles.timeOffTitle}>
+                                {formatDatePretty(s)}
+                                {isAllDayRow ? " (All day)" : ` • ${formatTimePretty(s)}`} → {formatDatePretty(e)}
+                                {isAllDayRow ? "" : ` • ${formatTimePretty(e)}`}
+                              </Text>
+
+                              {!!r.note && <Text style={styles.timeOffNote}>{r.note}</Text>}
+
+                              {(!r.start_time || !r.end_time) && (
+                                <Text style={[styles.timeOffNote, { marginTop: 6 }]}>
+                                  Note: This entry was missing time data. If it looks wrong, delete and re-add it.
+                                </Text>
+                              )}
+                            </View>
+
+                            <Pressable
+                              disabled={isDeleting}
+                              onPress={() =>
+                                Alert.alert("Delete time off?", "This will remove the block.", [
+                                  { text: "Cancel", style: "cancel" },
+                                  {
+                                    text: isDeleting ? "Deleting..." : "Delete",
+                                    style: "destructive",
+                                    onPress: () => deleteTimeOff(r),
+                                  },
+                                ])
+                              }
+                              style={[styles.trashBtn, isDeleting && { opacity: 0.5 }]}
+                            >
+                              {isDeleting ? (
+                                <ActivityIndicator />
+                              ) : (
+                                <Ionicons name="trash-outline" size={18} color={BLACK} />
+                              )}
+                            </Pressable>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+                </View>
+              </View>
+            )}
+
+            {/* ✅ Bottom spacer so last section never gets cut off */}
+            <View style={styles.bottomSpacer} />
+          </ScrollView>
         )}
       </View>
+
+      {/* Single stable picker */}
+      <DateTimePickerModal
+        isVisible={pickerTarget !== null}
+        mode={pickerMode as any}
+        date={pickerValue}
+        onConfirm={(d) => {
+          applyPickedDate(d);
+          closePicker();
+        }}
+        onCancel={closePicker}
+        minuteInterval={5}
+        is24Hour={false}
+        minimumDate={pickerTarget === "startDate" || pickerTarget === "startTime" ? new Date() : undefined}
+      />
     </SafeAreaView>
   );
 }
@@ -343,6 +753,10 @@ const styles = StyleSheet.create({
   },
 
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
+
+  scrollContent: {
+    paddingBottom: 24,
+  },
 
   card: {
     marginHorizontal: 16,
@@ -411,5 +825,46 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   primaryBtnText: { color: OFF_WHITE, fontWeight: "900" },
-});
 
+  pickerRow: {
+    backgroundColor: OFF_WHITE,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.10)",
+  },
+  pickerText: { color: BLACK, fontWeight: "900" },
+
+  timeOffRow: {
+    backgroundColor: OFF_WHITE,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.10)",
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  timeOffTitle: { fontWeight: "900", color: BLACK },
+  timeOffNote: { marginTop: 4, fontWeight: "800", color: MUTED, fontSize: 12 },
+
+  trashBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: SOFT,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+  },
+
+  // ✅ This prevents the last text from being cut off by tab bar / home indicator
+  bottomSpacer: {
+    height: Platform.OS === "ios" ? 30 : 30,
+  },
+});
